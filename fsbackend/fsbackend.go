@@ -1,0 +1,549 @@
+package fsbackend
+
+import (
+	"bytes"
+	"encoding/base32"
+	"encoding/xml"
+	"errors"
+	"hash/fnv"
+	"io"
+	"io/fs"
+	"log"
+	"net/http"
+	"os"
+	"path"
+	"strings"
+	"sync"
+
+	"bq-caldav/core"
+
+	"github.com/emersion/go-ical"
+	"github.com/gabriel-vasile/mimetype"
+)
+
+type FSBackend struct {
+	create func(p string) (io.WriteCloser, error)
+	mkdir  func(p string) error
+	delete func(p string) error
+	fsys   fs.FS
+	lock   *sync.Mutex
+}
+
+func NewBackend(location string) *FSBackend {
+	if e := os.MkdirAll(path.Join(location, "calendars"), os.ModePerm); e != nil {
+		panic(e)
+	}
+
+	return &FSBackend{
+		create: func(p string) (io.WriteCloser, error) {
+			return os.Create(path.Join(location, p))
+		},
+		mkdir: func(p string) error {
+			return os.Mkdir(path.Join(location, p), os.ModePerm)
+		},
+		delete: func(p string) error {
+			return os.RemoveAll(path.Join(location, p))
+		},
+		fsys: os.DirFS(location),
+		lock: new(sync.Mutex),
+	}
+}
+
+type notFound struct{}
+
+func (err *notFound) Error() string {
+	return http.StatusText(http.StatusNotFound)
+}
+
+// GET or HEAD
+func (b *FSBackend) Get(r *http.Request) (body []byte, content_type string, err error) {
+	b.lock.Lock()
+	defer b.lock.Unlock()
+
+	p := path.Clean(r.URL.Path)[1:]
+
+	if path.Base(p) == "props.xml" {
+		err = core.WebDAVerror(http.StatusNotFound, nil)
+	} else if fi, e := fs.Stat(b.fsys, p); e != nil {
+		err = core.WebDAVerror(http.StatusNotFound, nil)
+	} else if fi.IsDir(); e != nil {
+		err = core.WebDAVerror(http.StatusMethodNotAllowed, nil)
+	} else if etag, mt, _, br, e := b.getETagMTCLBody(p); e != nil {
+		// potentially bubble up to internal server error
+		// but probably not
+		log.Println("unexpected error: ", e.Error())
+		err = e
+	} else if e := core.IfMatchifNoneMatch(etag, r.Header.Get("If-Match"), r.Header.Get("If-None-Match")); e != nil {
+		err = e
+	} else {
+		content_type = mt.String()
+		body = br
+	}
+	return
+}
+
+// DELETE
+// allow deletion of calendar collections
+func (b *FSBackend) Delete(r *http.Request) (err error) {
+	b.lock.Lock()
+	defer b.lock.Unlock()
+
+	p := path.Clean(r.URL.Path)[1:]
+	if fi, e := fs.Stat(b.fsys, p); e != nil || path.Base(p) == "props.xml" {
+		return core.WebDAVerror(http.StatusNotFound, nil)
+	} else if fi.IsDir() {
+		return b.delete(p)
+	} else if etag, _, _, _, e := b.getETagMTCLBody(p); e != nil {
+		return e
+	} else if e := core.IfMatchifNoneMatch(etag, r.Header.Get("If-Match"), r.Header.Get("If-None-Match")); e != nil {
+		return err
+	} else if e := b.delete(p); e != nil {
+		return e
+	}
+	return nil
+}
+
+// MKCALENDAR
+func (b *FSBackend) MkCalendar(r *http.Request, prop_req *core.Prop) (resp core.PropStat, err error) {
+	b.lock.Lock()
+	defer b.lock.Unlock()
+
+	p := path.Clean(r.URL.Path)[1:]
+	if _, e := fs.Stat(b.fsys, p); !errors.Is(e, fs.ErrNotExist) {
+		err = core.WebDAVerror(http.StatusConflict, &xml.Name{Space: "DAV:", Local: "resource-must-be-null"})
+	} else if rsp, pw, e := core.CheckMkCalendarReq(prop_req); e != nil {
+		err = e
+	} else {
+		// write the new props.xml file
+		if e := b.mkdir(p); e != nil {
+			err = e
+		} else if f, e := b.create(path.Join(p, "props.xml")); e != nil {
+			err = e
+		} else if _, e := f.Write([]byte(xml.Header)); e != nil {
+			err = e
+		} else if e := xml.NewEncoder(f).Encode(pw); e != nil {
+			err = e
+		} else {
+			resp = rsp
+		}
+	}
+	return
+}
+
+// PUT
+func (b *FSBackend) Put(r *http.Request) (err error) {
+	b.lock.Lock()
+	defer b.lock.Unlock()
+
+	p := path.Clean(r.URL.Path)[1:]
+	if _, e := fs.Stat(b.fsys, path.Dir(p)); e != nil {
+		err = core.WebDAVerror(http.StatusConflict, nil)
+	} else if cal, e := core.CheckCalendarDataSupportedAndValid(r.Header.Get("Content-Type"), r.Body); e != nil {
+		err = e
+	} else if body, e := b.checkCalendarObject(r, p, cal); e != nil {
+		err = e
+	} else if f, e := b.create(p); e != nil {
+		err = e
+	} else if _, e := io.Copy(f, body); e != nil {
+		err = e
+	} else if e := f.Close(); e != nil {
+		err = e
+	}
+	return
+}
+
+func (b *FSBackend) checkCalendarObject(r *http.Request, p string, cal *ical.Calendar) (io.Reader, error) {
+	// if `if-match` or `if-none-match` fails return 412 precondition failed
+	// https://datatracker.ietf.org/doc/html/rfc7232
+	//
+	etag, _, _, _, _ := b.getETagMTCLBody(p)
+	// don't bother checking the error; etag == "" if the file does not exist
+
+	if e := core.IfMatchifNoneMatch(etag, r.Header.Get("If-Match"), r.Header.Get("If-None-Match")); e != nil {
+		return nil, e
+	}
+
+	// check additional caldav preconditions
+	// https://datatracker.ietf.org/doc/html/rfc4791#section-5.3.2.1
+	//
+	buf := bytes.NewBuffer(nil)
+
+	if _, e := core.ParseCalendarObjectResource(cal); e != nil {
+		return nil, e
+	} else if e := ical.NewEncoder(buf).Encode(cal); e != nil {
+		return nil, core.WebDAVerror(http.StatusInternalServerError, nil)
+	}
+	// do not bother checking
+	// uid-conflict
+	// max-instances for recurring events
+	// max-date-time, min-date-time
+	// max-attendees-per-instance
+	// max-resource-size
+	return buf, nil
+}
+
+// PROPPATCH
+func (b *FSBackend) PropPatch(r *http.Request, property_update *core.PropertyUpdate) (ms *core.MultiStatus, err error) {
+	b.lock.Lock()
+	defer b.lock.Unlock()
+
+	p := path.Clean(path.Join(r.URL.Path, "props.xml"))[1:]
+
+	current_prop := &core.Prop{}
+	if f, e := b.fsys.Open(p); e != nil {
+		err = e
+	} else if e := xml.NewDecoder(f).Decode(current_prop); e != nil {
+		err = e
+	}
+	if err != nil {
+		return
+	}
+
+	// return ms, and record new_prop (reusing current_prop struct)
+	ms, current_prop = core.PropPatchHelper(current_prop, property_update)
+
+	// write the new props.xml file
+	if f, e := b.create(p); e != nil {
+		err = e
+	} else if _, e := f.Write([]byte(xml.Header)); e != nil {
+		err = e
+	} else if e := xml.NewEncoder(f).Encode(current_prop); e != nil {
+		err = e
+	}
+	return
+}
+
+// PROPFIND
+func (b *FSBackend) PropFind(r *http.Request, pf *core.PropFind, depth byte) (ms *core.MultiStatus, err error) {
+	b.lock.Lock()
+	defer b.lock.Unlock()
+
+	ms = &core.MultiStatus{}
+	p := path.Clean(r.URL.Path)[1:]
+	if p == "" {
+		p = "."
+	}
+	if stat, e := fs.Stat(b.fsys, p); e != nil {
+		return nil, core.WebDAVerror(http.StatusNotFound, nil)
+	} else if !stat.IsDir() || depth == 0 {
+		if resp, e := b.propFindResource(p, stat, pf); e != nil {
+			return nil, e
+		} else {
+			ms.Responses = []core.Response{*resp}
+			return
+		}
+	}
+	resps := make([]core.Response, 0, 128)
+	err = fs.WalkDir(b.fsys, p, func(q string, de fs.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		} else if fi, e := de.Info(); e != nil {
+			return nil
+		} else if resp, e := b.propFindResource(q, fi, pf); e != nil {
+			if !errors.Is(e, &notFound{}) {
+				return e
+			} else {
+				// do not fail if NotFound, since walking dir
+				return nil
+			}
+		} else {
+			resps = append(resps, *resp)
+		}
+		if depth == 1 && de.IsDir() && len(p) < len(q) {
+			return fs.SkipDir
+		}
+		return nil
+	})
+	ms.Responses = resps
+	return
+}
+
+func (b *FSBackend) propFindResource(p string, fi fs.FileInfo, pf *core.PropFind) (resp *core.Response, err error) {
+	var props_Found []core.Any
+	if fi.IsDir() {
+		props_Found, err = b.propFindDir(p)
+	} else {
+		props_Found, _, err = b.propFindFile(p, fi)
+	}
+	if err != nil {
+		return
+	}
+
+	if p == "." {
+		p = "/"
+	} else {
+		p = "/" + p
+	}
+	return &core.Response{
+		PropStats: core.CleanProps(props_Found, pf.PropName, pf.Include, pf.AllProp, pf.Prop),
+		Hrefs:     []core.Href{{Target: p}},
+	}, nil
+}
+
+func (b *FSBackend) propFindDir(p string) (props_Found []core.Any, err error) {
+	if p == "." {
+		return core.DefaultPropsRoot(), nil
+	}
+
+	if p == "calendars" {
+		return core.DefaultPropsHomeSet(), nil
+	}
+
+	if d, _ := path.Split(p); d != "calendars/" {
+		return nil, &notFound{}
+	}
+
+	prop := &core.Prop{}
+	if f, e := b.fsys.Open(path.Join(p, "props.xml")); e != nil {
+		return nil, &notFound{}
+	} else if e := xml.NewDecoder(f).Decode(prop); e != nil {
+		// bubble up internal server error
+		return nil, e
+	}
+
+	props_Found = core.MarshalPropsCalendarCollection(prop)
+	return
+}
+
+func (b *FSBackend) getETagMTCLBody(p string) (etag string, mt *mimetype.MIME, content_length int64, body []byte, err error) {
+	buf := bytes.NewBuffer(nil)
+
+	if f, e := b.fsys.Open(p); e != nil {
+		err = &notFound{}
+		return
+	} else {
+		h := fnv.New32a()
+		if n, e := io.Copy(buf, io.TeeReader(f, h)); e != nil {
+			err = e
+			return
+		} else if e := f.Close(); e != nil {
+			err = e
+			return
+		} else {
+			content_length = n
+		}
+		etag = base32.StdEncoding.EncodeToString(h.Sum(nil))[:7]
+	}
+	mt = mimetype.Detect(buf.Bytes())
+	body = buf.Bytes()
+	return
+}
+
+func (b *FSBackend) propFindFile(p string, fi fs.FileInfo) (props_Found []core.Any, body []byte, err error) {
+	if path.Base(p) == "props.xml" {
+		return nil, nil, &notFound{}
+	}
+
+	var etag string
+	var mt_string string
+	var content_length int64
+	if et, mt, cl, br, e := b.getETagMTCLBody(p); e != nil {
+		err = e
+		return
+	} else {
+		etag = et
+		content_length = cl
+		mt_string = mt.String()
+		body = br
+	}
+	props_Found = core.DefaultPropsFile(mt_string, content_length, fi.ModTime(), etag)
+	return
+}
+
+// REPORT calendar-query
+func (b *FSBackend) Query(r *http.Request, query *core.CalendarQuery, depth byte) (ms *core.MultiStatus, err error) {
+	b.lock.Lock()
+	defer b.lock.Unlock()
+
+	ms = &core.MultiStatus{}
+	p := path.Clean(r.URL.Path)[1:]
+	if p == "" {
+		p = "."
+	}
+
+	if fi, e := fs.Stat(b.fsys, p); e != nil {
+		// empty return means empty multistatus
+		// which is the expected behavior
+		return
+	} else if fi.IsDir() && depth == 0 {
+		return
+	} else if depth == 0 {
+		if resp, match, e := b.queryFile(p, fi, query); !match || e != nil {
+			if !errors.Is(e, &notFound{}) {
+				// this could return a not-implemented error
+				// if the client tries a not-implemented query
+				err = e
+			}
+			return
+		} else {
+			ms.Responses = []core.Response{*resp}
+			return
+		}
+	}
+	resps := make([]core.Response, 0, 128)
+	err = fs.WalkDir(b.fsys, p, func(q string, de fs.DirEntry, err error) error {
+		if depth == 1 && de.IsDir() && len(p) < len(q) {
+			return fs.SkipDir
+		} else if err != nil || de.IsDir() {
+			return nil
+		} else if fi, e := de.Info(); e != nil {
+			return nil
+		} else if resp, match, e := b.queryFile(q, fi, query); e != nil || !match {
+			if !errors.Is(e, &notFound{}) {
+				err = e
+			}
+			return nil
+		} else {
+			resps = append(resps, *resp)
+		}
+		return nil
+	})
+	ms.Responses = resps
+	return
+}
+
+func (b *FSBackend) queryFile(p string, fi fs.FileInfo, query *core.CalendarQuery) (resp *core.Response, match bool, err error) {
+	var file io.Reader
+	var props_Found []core.Any
+	if pf, f, e := b.propFindFile(p, fi); e != nil {
+		err = e
+		return
+	} else {
+		file = bytes.NewBuffer(f)
+		props_Found = pf
+	}
+
+	// now check if the file matches the query
+	if cal, e := ical.NewDecoder(file).Decode(); e != nil {
+		err = core.WebDAVerror(http.StatusInternalServerError, nil)
+		return
+	} else if m, e := core.MatchCalendarWithQuery(cal, query); e != nil {
+		// webdav error such as: not-implemented or bad-request
+		err = e
+		return
+	} else if !m {
+		return
+	} else if a, e := core.CalendarData(cal, query.Prop); e != nil {
+		// internal server error or webdav not-implemented
+		err = e
+		return
+	} else if a != nil {
+		props_Found = append(props_Found, *a)
+	}
+
+	// clean up the props
+	propstats := core.CleanProps(props_Found, query.PropName, nil, query.AllProp, query.Prop)
+
+	if p == "." {
+		p = "/"
+	} else {
+		p = "/" + p
+	}
+	return &core.Response{
+		PropStats: propstats,
+		Hrefs:     []core.Href{{Target: p}},
+	}, true, nil
+}
+
+// REPORT calendar-multiget
+func (b *FSBackend) Multiget(r *http.Request, multiget *core.CalendarMultiget) (ms *core.MultiStatus, err error) {
+	b.lock.Lock()
+	defer b.lock.Unlock()
+
+	p := path.Clean(r.URL.Path)[1:]
+	if p == "" {
+		p = "."
+	}
+	var resps []core.Response
+
+	if fi, e := fs.Stat(b.fsys, p); e != nil {
+		return
+	} else if !fi.IsDir() {
+		if resp, e := b.multigetFile(p, fi, multiget); e != nil {
+			goto jump
+		} else {
+			resps = []core.Response{*resp}
+			goto jump
+		}
+	}
+	// depth is infinite
+
+	resps = make([]core.Response, 0, 128)
+	fs.WalkDir(b.fsys, p, func(q string, de fs.DirEntry, err error) error {
+		if err != nil || de.IsDir() {
+			return nil
+		} else if fi, e := de.Info(); e != nil {
+			return nil
+		} else if resp, e := b.multigetFile(q, fi, multiget); e != nil {
+			return nil
+		} else {
+			resps = append(resps, *resp)
+		}
+		return nil
+	})
+jump:
+	ms = core.MarshalMultigetRespose(multiget, resps)
+	return
+}
+
+func (b *FSBackend) multigetFile(p string, fi fs.FileInfo, multiget *core.CalendarMultiget) (resp *core.Response, err error) {
+	for _, href := range multiget.Hrefs {
+		if path.Clean(href.Target)[1:] == p {
+			goto jump
+		}
+	}
+	return nil, &notFound{}
+jump:
+	var file io.Reader
+	var props_Found []core.Any
+	if pf, f, e := b.propFindFile(p, fi); e != nil {
+		err = e
+		return
+	} else {
+		file = bytes.NewBuffer(f)
+		props_Found = pf
+	}
+
+	// now write calendar-data
+	if cal, e := ical.NewDecoder(file).Decode(); e != nil {
+		return
+	} else if a, e := core.CalendarData(cal, multiget.Prop); e != nil {
+		return
+	} else if a != nil {
+		props_Found = append(props_Found, *a)
+	}
+
+	// clean up the props
+	propstats := core.CleanProps(props_Found, multiget.PropName, nil, multiget.AllProp, multiget.Prop)
+	return &core.Response{
+		PropStats: propstats,
+		Hrefs:     []core.Href{{Target: "/" + p}},
+	}, nil
+}
+
+// OPTIONS
+func (b *FSBackend) Options(r *http.Request) (caps []string, allow []string) {
+	p := path.Clean(r.URL.Path)
+
+	if p == "/" {
+		caps = []string{"1", "3", "calendar-access"}
+		allow = []string{http.MethodOptions, "PROPFIND", "REPORT"}
+		return
+	}
+
+	p = p[1:]
+	components := strings.Split(p, "/")
+	if components[0] == "calendars" {
+		caps = []string{"1", "3", "calendar-access"}
+		switch len(components) {
+		case 1: // path targets /calendars
+			allow = []string{http.MethodOptions, "PROPFIND", "REPORT"}
+		case 2: // path targets /calendars/X
+			allow = []string{http.MethodOptions, "PROPFIND", "REPORT", "PROPPATCH", "MKCALENDAR", "DELETE"}
+		case 3: // path targets /calendars/X/Y
+			allow = []string{http.MethodOptions, "PROPFIND", "REPORT", "DELETE", "PUT", "GET", "HEAD"}
+		default:
+		}
+	}
+	return
+}
