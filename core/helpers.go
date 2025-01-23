@@ -3,26 +3,34 @@ package core
 import (
 	"bytes"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"io"
 	"mime"
 	"net/http"
+	"path"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/emersion/go-ical"
+	"github.com/emersion/go-vcard"
 )
 
-var statusOK = statusHelper(http.StatusOK)
-var statusNotFound = statusHelper(http.StatusNotFound)
-var statusFailedDependency = statusHelper(http.StatusFailedDependency)
-var defaultSupportedReportSet = supportedReportSetHelper(calendarQueryName, calendarMultiGetName)
-var principalURL, currentUserPrincipal = newPrincipalURL("/")
-var supportedCalendarComponentSet = supportedCalendarComponentSetHelper("VEVENT")
-var defaultCalendarHomeSet = newCalendarHomeSet("/calendars/")
-var collectionResourceType = newResourceType(collectionTypeName)
-var calendarResourceType = newResourceType(collectionTypeName, calendarTypeName)
+var (
+	statusOK                                             = statusHelper(http.StatusOK)
+	statusNotFound                                       = statusHelper(http.StatusNotFound)
+	statusFailedDependency                               = statusHelper(http.StatusFailedDependency)
+	statusForbidden                                      = statusHelper(http.StatusForbidden)
+	principalURL, currentUserPrincipal, principalAddress = newPrincipalURL("/")
+	defaultSupportedCalendarComponentSet                 = supportedCalendarComponentSetHelper("VEVENT")
+	defaultSupportedAddressData                          = supportedAddressDataHelper("3.0", "4.0")
+	defaultCalendarHomeSet                               = newCalendarHomeSet("/calendars/")
+	defaultAddressbookHomeSet                            = newAddressbookHomeSet("/addressbook/")
+	collectionResourceType                               = newResourceType(collectionTypeName)
+	calendarResourceType                                 = newResourceType(collectionTypeName, calendarTypeName)
+	addressbookResourceType                              = newResourceType(collectionTypeName, addressbookTypeName)
+)
 
 func newCalendarHomeSet(href string) Any {
 	if b, e := xml.Marshal(Href{Target: href}); e != nil {
@@ -35,8 +43,21 @@ func newCalendarHomeSet(href string) Any {
 	}
 }
 
-func newPrincipalURL(href string) (principalURL Any, currentUserPrincipal Any) {
+func newAddressbookHomeSet(href string) Any {
 	if b, e := xml.Marshal(Href{Target: href}); e != nil {
+		panic(e)
+	} else {
+		return Any{
+			XMLName: addressbookHomeSetName,
+			Content: b,
+		}
+	}
+}
+
+func newPrincipalURL(href string) (principalURL Any, currentUserPrincipal Any, principalAddress Any) {
+	if b, e := xml.Marshal(Href{Target: href}); e != nil {
+		panic(e)
+	} else if b_medotvcf, e := xml.Marshal(Href{Target: path.Join(href, "me.vcf")}); e != nil {
 		panic(e)
 	} else {
 		return Any{
@@ -45,6 +66,9 @@ func newPrincipalURL(href string) (principalURL Any, currentUserPrincipal Any) {
 			}, Any{
 				XMLName: currentUserPrincipalName,
 				Content: b,
+			}, Any{
+				XMLName: principalAddressName,
+				Content: b_medotvcf,
 			}
 	}
 }
@@ -54,7 +78,7 @@ func supportedCalendarComponentSetHelper(types ...string) Any {
 	for k, t := range types {
 		comps[k] = Any{
 			XMLName: compName,
-			Attrs: []xml.Attr{
+			Attr: []xml.Attr{
 				{
 					Name:  xml.Name{Local: "name"},
 					Value: t,
@@ -72,23 +96,40 @@ func supportedCalendarComponentSetHelper(types ...string) Any {
 	}
 }
 
-func newResourceType(names ...xml.Name) Any {
-	types := make([]Any, len(names))
-	for k, name := range names {
-		types[k] = Any{
-			XMLName: name,
+func supportedAddressDataHelper(versions ...string) Any {
+	data_types := make([]Any, len(versions))
+	for k, v := range versions {
+		data_types[k] = Any{
+			XMLName: addressDataTypeName,
+			Attr: []xml.Attr{
+				{
+					Name:  xml.Name{Local: "content-type"},
+					Value: "text/vcard",
+				}, {
+					Name:  xml.Name{Local: "version"},
+					Value: v,
+				},
+			},
 		}
 	}
-	rt := &ResourceType{
-		ResourceTypes: types,
-	}
-	any := Any{}
-	if b, e := xml.Marshal(rt); e != nil {
-		panic(e)
-	} else if e := xml.Unmarshal(b, &any); e != nil {
+	if b, e := xml.Marshal(data_types); e != nil {
 		panic(e)
 	} else {
-		return any
+		return Any{
+			XMLName: supportedAddressDataName,
+			Content: b,
+		}
+	}
+}
+
+func newResourceType(names ...xml.Name) Any {
+	buf := bytes.NewBuffer(nil)
+	for _, name := range names {
+		buf.WriteString(fmt.Sprintf("<%s xmlns=\"%s\"/>", name.Local, name.Space))
+	}
+	return Any{
+		XMLName: resourceTypeName,
+		Content: buf.Bytes(),
 	}
 }
 
@@ -96,7 +137,7 @@ func statusHelper(code int) status {
 	return status{Text: fmt.Sprintf("HTTP/1.1 %v %v", code, http.StatusText(code))}
 }
 
-func supportedReportSetHelper(names ...xml.Name) Any {
+func supportedReportSetHelper(names ...xml.Name) *Any {
 	srs := make([]supportedReport, len(names))
 
 	for k, n := range names {
@@ -109,15 +150,29 @@ func supportedReportSetHelper(names ...xml.Name) Any {
 		}
 	}
 
-	a := Any{}
+	a := &Any{}
 	if b, e := xml.Marshal(supportedReportSet{
 		SupportedReports: srs,
 	}); e != nil {
 		panic(e)
-	} else if e := xml.Unmarshal(b, &a); e != nil {
+	} else if e := xml.Unmarshal(b, a); e != nil {
 		panic(e)
 	} else {
 		return a
+	}
+}
+
+// String method for Scope to provide a human-readable representation
+func (s Scope) SupportedReportSet() *Any {
+	switch s {
+	case CalendarScope:
+		return supportedReportSetHelper(calendarQueryName, calendarMultiGetName)
+	case AddressbookScope:
+		return supportedReportSetHelper(addressbookQueryName, addressbookMultiGetName)
+	case CalendarScope | AddressbookScope:
+		return supportedReportSetHelper(calendarQueryName, calendarMultiGetName, addressbookQueryName, addressbookMultiGetName)
+	default:
+		return nil
 	}
 }
 
@@ -180,9 +235,11 @@ outer:
 	return
 }
 
-func CleanProps(props_Found []Any, propName *struct{}, include *Include, allProp *struct{}, reqProp *Prop) (propstats []PropStat) {
-	// props to add to each resource
-	props_Found = append(props_Found, currentUserPrincipal, principalURL, defaultSupportedReportSet)
+func CleanProps(scope Scope, props_Found []Any, propName *struct{}, include *Include, allProp *struct{}, reqProp *Prop) (propstats []PropStat) {
+	props_Found = append(props_Found, currentUserPrincipal, principalURL)
+	if a := scope.SupportedReportSet(); a != nil {
+		props_Found = append(props_Found, *a)
+	}
 
 	var props_OK []Any
 	var props_NotFound []Any
@@ -251,6 +308,8 @@ func DefaultPropsRoot() []Any {
 	return []Any{
 		collectionResourceType,
 		defaultCalendarHomeSet,
+		defaultAddressbookHomeSet,
+		principalAddress,
 	}
 }
 
@@ -263,7 +322,7 @@ func DefaultPropsHomeSet() []Any {
 func MarshalPropsCalendarCollection(custom *Prop) (props_Found []Any) {
 	props_Found = []Any{
 		calendarResourceType,
-		supportedCalendarComponentSet,
+		defaultSupportedCalendarComponentSet,
 	}
 	for _, q := range custom.Props {
 		if q.XMLName == resourceTypeName || q.XMLName == supportedCalendarComponentSetName {
@@ -274,14 +333,30 @@ func MarshalPropsCalendarCollection(custom *Prop) (props_Found []Any) {
 	return
 }
 
+func MarshalPropsAddressbookCollection(custom *Prop) (props_Found []Any) {
+	props_Found = []Any{
+		addressbookResourceType,
+		defaultSupportedAddressData,
+	}
+	for _, q := range custom.Props {
+		if q.XMLName == resourceTypeName || q.XMLName == supportedAddressDataName {
+			continue
+		}
+		props_Found = append(props_Found, q)
+	}
+	return
+}
+
 // comp filter
 
-func MatchCalendarWithQuery(cal *ical.Calendar, query *CalendarQuery) (bool, error) {
-	if query.Filter.CompFilter.Name != cal.Component.Name {
+func MatchCalendarWithQuery(cal *ical.Calendar, query *Query) (bool, error) {
+	if query.CalendarFilter == nil {
+		return false, fmt.Errorf("query is unset")
+	} else if query.CalendarFilter.CompFilter.Name != cal.Component.Name {
 		return false, nil
 	}
 
-	return matchCompFilterWithComp(query.Filter.CompFilter, cal.Component)
+	return matchCompFilterWithComp(query.CalendarFilter.CompFilter, cal.Component)
 }
 
 func matchCompFilterWithComp(cf compFilter, comp *ical.Component) (match bool, err error) {
@@ -465,7 +540,7 @@ func CalendarData(cal *ical.Calendar, prop *Prop) (*Any, error) {
 	}
 	return &Any{
 		XMLName: calendarDataName,
-		Attrs: []xml.Attr{
+		Attr: []xml.Attr{
 			{
 				Name:  xml.Name{Local: "content-type"},
 				Value: ical.MIMEType,
@@ -473,6 +548,52 @@ func CalendarData(cal *ical.Calendar, prop *Prop) (*Any, error) {
 			{
 				Name:  xml.Name{Local: "version"},
 				Value: "2.0",
+			},
+		},
+		Content: escaped.Bytes(),
+	}, nil
+}
+
+// calendar data helper
+func AddressData(card vcard.Card, prop *Prop) (*Any, error) {
+	if prop == nil {
+		return nil, nil
+	}
+	var adata *Any
+	for _, val := range prop.Props {
+		if val.XMLName == addressDataName {
+			adata = &val
+			break
+		}
+	}
+	if adata == nil {
+		return nil, nil
+	}
+	if adata.Content != nil {
+		return nil, &webDAVerror{
+			Code: http.StatusNotImplemented,
+		}
+	}
+
+	vcard.ToV4(card)
+	raw, escaped := bytes.NewBuffer(nil), bytes.NewBuffer(nil)
+	if e := vcard.NewEncoder(raw).Encode(card); e != nil {
+		// this will be bubbled up to internal server error
+		return nil, e
+	} else if e := xml.EscapeText(escaped, raw.Bytes()); e != nil {
+		// this will be bubbled up to internal server error
+		return nil, e
+	}
+	return &Any{
+		XMLName: addressDataName,
+		Attr: []xml.Attr{
+			{
+				Name:  xml.Name{Local: "content-type"},
+				Value: vcard.MIMEType,
+			},
+			{
+				Name:  xml.Name{Local: "version"},
+				Value: "4.0",
 			},
 		},
 		Content: escaped.Bytes(),
@@ -581,13 +702,13 @@ outer3:
 		}
 	}
 	new_prop = &Prop{
-		Props: filterCalendarProps(new_props),
+		Props: filterProps(new_props),
 	}
 	return
 }
 
 // multiget helper
-func MarshalMultigetRespose(multiget *CalendarMultiget, resps []Response) *MultiStatus {
+func MarshalMultigetRespose(multiget *Multiget, resps []Response) *MultiStatus {
 outer:
 	for _, href := range multiget.Hrefs {
 		for _, resp := range resps {
@@ -623,77 +744,215 @@ func CheckCalendarDataSupportedAndValid(content_type_header string, request_body
 	return
 }
 
-// mkcalendar helper
-func CheckMkCalendarReq(prop_req *Prop) (resp PropStat, prop_write Prop, err error) {
-	new_props := []Any{calendarResourceType, supportedCalendarComponentSet}
-	if prop_req == nil {
-		resp = PropStat{
-			Prop: Prop{
-				Props: new_props,
-			},
-			Status:              statusOK,
-			ResponseDescription: "Calendar collection created",
+func CheckAddressDataSupportedAndValid(content_type_header string, request_body io.Reader) (card vcard.Card, err error) {
+	if mt, _, e := mime.ParseMediaType(content_type_header); e != nil || mt != vcard.MIMEType {
+		err = &webDAVerror{
+			Code:      http.StatusForbidden,
+			Condition: &supportedAddressDataName,
 		}
-		return
-	}
-
-	for _, prop := range prop_req.Props {
-		switch prop.XMLName {
-		case resourceTypeName, supportedCalendarComponentSetName:
-			continue
-		case calendarTimezoneName:
-			err = &webDAVerror{
-				Code:      http.StatusForbidden,
-				Condition: &validCalendarDataName,
-			}
-			timezone := &calendarTimezone{}
-			if v, e := xml.Marshal(prop); e != nil {
-				return
-			} else if e := xml.Unmarshal(v, timezone); e != nil {
-				return
-			}
-
-			buf := bytes.NewReader(timezone.Content)
-			cal, e := ical.NewDecoder(buf).Decode()
-			if e != nil {
-				return
-			}
-			raw, escaped := bytes.NewBuffer(nil), bytes.NewBuffer(nil)
-			if e := ical.NewEncoder(raw).Encode(cal); e != nil {
-				return
-			} else if e := xml.EscapeText(escaped, raw.Bytes()); e != nil {
-				return
-			}
-			err = nil
-			prop.Content = escaped.Bytes()
-			new_props = append(new_props, prop)
-		default:
-			new_props = append(new_props, prop)
+	} else if c, e := vcard.NewDecoder(request_body).Decode(); e != nil {
+		err = &webDAVerror{
+			Code:      http.StatusForbidden,
+			Condition: &validAddressDataName,
 		}
+	} else {
+		vcard.ToV4(c)
+		card = c
 	}
-	resp = PropStat{
-		Prop: Prop{
-			Props: new_props,
-		},
-		Status:              statusOK,
-		ResponseDescription: "Calendar collection created",
-	}
-	prop_write = Prop{
-		Props: filterCalendarProps(new_props),
-	}
-
 	return
 }
 
-func filterCalendarProps(new_props []Any) (filtered_props []Any) {
+func CheckMkColReq(scope Scope, prop_req []Prop) (resp []PropStat, prop_write Prop, err error) {
+	new_props := make([]Any, 0, 16)
+	bad_props := make([]PropStat, 0, 4)
+	write_props := make([]Any, 0, 16)
+	for _, prop := range prop_req {
+		for _, a := range prop.Props {
+			switch a.XMLName {
+			case resourceTypeName:
+				var check int
+				d := xml.NewDecoder(bytes.NewBuffer(a.Content))
+				for {
+					if tok, e := d.Token(); errors.Is(e, io.EOF) {
+						break
+					} else if t, ok := tok.(xml.StartElement); ok {
+						switch scope {
+						case CalendarScope:
+							if t.Name == calendarTypeName || t.Name == collectionTypeName {
+								check++
+							}
+						case AddressbookScope:
+							if t.Name == addressbookTypeName || t.Name == collectionTypeName {
+								check++
+							}
+						}
+					}
+				}
+				if check != 2 {
+					bad_props = append(bad_props, PropStat{
+						Prop: Prop{
+							Props: []Any{{
+								XMLName: resourceTypeName,
+							}},
+						},
+						Status: statusForbidden,
+						Error:  wrapError(validResourceTypeName),
+					})
+				} else {
+					new_props = append(new_props, Any{XMLName: a.XMLName})
+				}
+			case supportedCalendarComponentSetName:
+				if scope != CalendarScope {
+					bad_props = append(bad_props, PropStat{
+						Prop: Prop{
+							Props: []Any{{
+								XMLName: a.XMLName,
+							}},
+						},
+						Status:              statusForbidden,
+						ResponseDescription: "Unsupported property for non-calendar collections",
+					})
+					continue
+				}
+				var check bool = true
+				d := xml.NewDecoder(bytes.NewBuffer(a.Content))
+				for {
+					if tok, e := d.Token(); e != nil {
+						if errors.Is(e, io.EOF) {
+							break
+						} else {
+							err = &webDAVerror{
+								Code: http.StatusBadRequest,
+							}
+							return
+						}
+					} else if t, ok := tok.(xml.StartElement); ok {
+						for _, attr := range t.Attr {
+							if name, val := attr.Name.Local, attr.Value; name != "name" {
+								continue
+							} else if val != ical.CompEvent {
+								check = false
+								break
+							}
+						}
+					}
+				}
+				if !check {
+					bad_props = append(bad_props, PropStat{
+						Prop: Prop{
+							Props: []Any{{
+								XMLName: a.XMLName,
+							}},
+						},
+						Status:              statusForbidden,
+						ResponseDescription: "only VEVENT collections are supported",
+					})
+				} else {
+					new_props = append(new_props, Any{XMLName: a.XMLName})
+				}
+			case supportedAddressDataName:
+				if scope != AddressbookScope {
+					bad_props = append(bad_props, PropStat{
+						Prop: Prop{
+							Props: []Any{{
+								XMLName: a.XMLName,
+							}},
+						},
+						Status:              statusForbidden,
+						ResponseDescription: "Unsupported property for non-addressbook collections",
+					})
+					continue
+				}
+				var check bool = true
+				d := xml.NewDecoder(bytes.NewBuffer(a.Content))
+				for {
+					if tok, e := d.Token(); e != nil {
+						if errors.Is(e, io.EOF) {
+							break
+						} else {
+							err = &webDAVerror{
+								Code: http.StatusBadRequest,
+							}
+							return
+						}
+					} else if t, ok := tok.(xml.StartElement); ok {
+						for _, attr := range t.Attr {
+							if name, val := attr.Name.Local, attr.Value; name != "version" && name != "content-type" {
+								continue
+							} else if name == "version" && val != "4.0" && val != "3.0" {
+								check = false
+								break
+							} else if name == "content-type" && val != vcard.MIMEType {
+								check = false
+								break
+							}
+						}
+					}
+				}
+				if !check {
+					bad_props = append(bad_props, PropStat{
+						Prop: Prop{
+							Props: []Any{{
+								XMLName: a.XMLName,
+							}},
+						},
+						Status:              statusForbidden,
+						ResponseDescription: "content-type must be \"text/vcard\" with version \"3.0\" or \"4.0\"",
+					})
+				} else {
+					new_props = append(new_props, Any{XMLName: a.XMLName})
+				}
+			default:
+				write_props = append(write_props, a)
+				new_props = append(new_props, Any{XMLName: a.XMLName})
+			}
+		}
+	}
+	if len(bad_props) != 0 {
+		resp = append(bad_props, PropStat{
+			Prop: Prop{
+				Props: new_props,
+			},
+			Status: statusFailedDependency,
+		})
+	}
+	prop_write = Prop{
+		Props: write_props,
+	}
+	return
+}
+
+func filterProps(new_props []Any) (filtered_props []Any) {
 	filtered_props = make([]Any, 0, len(new_props))
 	for _, prop := range new_props {
 		switch prop.XMLName {
-		case resourceTypeName, supportedCalendarComponentSetName:
+		case resourceTypeName, supportedCalendarComponentSetName, supportedAddressDataName:
 			continue
 		default:
 			filtered_props = append(filtered_props, prop)
 		}
 	}
 	return
+}
+
+func (m *Multiget) Scope() Scope {
+	switch m.XMLName {
+	case calendarMultiGetName:
+		return CalendarScope
+	case addressbookMultiGetName:
+		return AddressbookScope
+	default:
+		return 0
+	}
+}
+
+func (q *Query) Scope() Scope {
+	switch q.XMLName {
+	case calendarQueryName:
+		return CalendarScope
+	case addressbookQueryName:
+		return AddressbookScope
+	default:
+		return 0
+	}
 }

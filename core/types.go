@@ -5,6 +5,15 @@ import (
 	"net/http"
 )
 
+type Scope uint8
+
+// Define flags for each scope
+const (
+	CalendarScope    Scope = 1 << iota // 1
+	AddressbookScope                   // 2 (1 << 1)
+	// You can add more scopes here if needed
+)
+
 type webDAVerror struct {
 	Code      int
 	Condition *xml.Name

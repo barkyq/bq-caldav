@@ -14,9 +14,9 @@ type Backend interface {
 	Delete(r *http.Request) (err error)
 	PropFind(r *http.Request, pf *PropFind, depth byte) (ms *MultiStatus, err error)
 	PropPatch(r *http.Request, property_update *PropertyUpdate) (ms *MultiStatus, err error)
-	MkCalendar(r *http.Request, prop_req *Prop) (resp PropStat, err error)
-	Query(r *http.Request, query *CalendarQuery, depth byte) (ms *MultiStatus, err error)
-	Multiget(r *http.Request, multiget *CalendarMultiget) (ms *MultiStatus, err error)
+	MkCol(r *http.Request, props []Prop) (resp []PropStat, err error)
+	Query(r *http.Request, query *Query, depth byte) (ms *MultiStatus, err error)
+	Multiget(r *http.Request, multiget *Multiget) (ms *MultiStatus, err error)
 	Options(r *http.Request) (caps []string, allow []string)
 }
 
@@ -25,9 +25,11 @@ type Handler struct {
 }
 
 func (h *Handler) serveOptions(caps []string, allow []string, w http.ResponseWriter, r *http.Request) {
-	w.Header().Add("DAV", strings.Join(caps, ", "))
+	if caps != nil {
+		w.Header().Add("DAV", strings.Join(caps, ", "))
+	}
 	w.Header().Add("Allow", strings.Join(allow, ", "))
-	w.WriteHeader(http.StatusNoContent)
+	w.WriteHeader(http.StatusOK)
 	w.Write(nil)
 }
 
@@ -58,28 +60,75 @@ func (h *Handler) handlePut(w http.ResponseWriter, r *http.Request) error {
 	}
 }
 
-func (h *Handler) handleMkCalendar(w http.ResponseWriter, r *http.Request) error {
-	mkcal := &mkCalendarRequest{}
+func (h *Handler) handleMkCol(w http.ResponseWriter, r *http.Request) error {
+	mkcol := &mkColRequest{}
 	if isXML, e := isContentXML(r.Header); e != nil {
 		return e
 	} else if isXML {
-		if e := xml.NewDecoder(r.Body).Decode(mkcal); e != nil {
+		if e := xml.NewDecoder(r.Body).Decode(mkcol); e != nil {
 			return &webDAVerror{
 				Code: http.StatusBadRequest,
 			}
 		}
 	}
 
-	if resp, e := h.Backend.MkCalendar(r, mkcal.Set); e != nil {
-		return e
-	} else if v, e := xml.Marshal(&mkCalendarResponse{PropStat: resp}); e != nil {
+	if resp, e := h.Backend.MkCol(r, mkcol.Props); e != nil {
 		return e
 	} else {
-		w.WriteHeader(http.StatusCreated)
-		w.Write(v)
-		return nil
+		switch r.Method {
+		case "MKCOL":
+			if v, e := xml.Marshal(&mkColResponse{PropStats: resp}); e != nil {
+				return e
+			} else {
+				if len(resp) != 0 {
+					w.WriteHeader(http.StatusForbidden)
+					w.Write(v)
+				} else {
+					w.WriteHeader(http.StatusCreated)
+					w.Write(nil)
+				}
+				return nil
+			}
+		case "MKCALENDAR":
+			if v, e := xml.Marshal(&mkCalendarResponse{PropStats: resp}); e != nil {
+				return e
+			} else {
+				if len(resp) != 0 {
+					w.WriteHeader(http.StatusForbidden)
+					w.Write(v)
+				} else {
+					w.WriteHeader(http.StatusCreated)
+					w.Write(nil)
+				}
+				return nil
+			}
+		default:
+			panic("unknown method")
+		}
 	}
 }
+
+// func (h *Handler) handleMkCalendar(w http.ResponseWriter, r *http.Request) error {
+// 	mkcal := &mkCalendarRequest{}
+// 	if isXML, e := isContentXML(r.Header); e != nil {
+// 		return e
+// 	} else if isXML {
+// 		if e := xml.NewDecoder(r.Body).Decode(mkcal); e != nil {
+// 			return &webDAVerror{
+// 				Code: http.StatusBadRequest,
+// 			}
+// 		}
+// 	}
+// 	if resp, e := h.Backend.MkCalendar(r, mkcal.Set); e != nil {
+// 		return e
+// 	} else if v, e := xml.Marshal(&mkCalendarResponse{PropStat: resp}); e != nil {
+// 		return e
+// 	} else {
+// 		w.WriteHeader(http.StatusCreated)
+// 		w.Write(v)
+// 		return nil
+// 	}
+// }
 
 func (h *Handler) handleDelete(w http.ResponseWriter, r *http.Request) error {
 	if e := h.Backend.Delete(r); e != nil {
@@ -244,9 +293,9 @@ mux:
 		err = h.handleDelete(w, r)
 	case "PROPPATCH":
 		err = h.handlePropPatch(w, r)
-	case "MKCALENDAR":
-		err = h.handleMkCalendar(w, r)
-	case "MKCOL", "COPY", "MOVE":
+	case "MKCALENDAR", "MKCOL":
+		err = h.handleMkCol(w, r)
+	case "COPY", "MOVE":
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		w.Write(nil)
 	}

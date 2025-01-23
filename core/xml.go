@@ -1,8 +1,12 @@
 package core
 
 import (
+	"bytes"
 	"encoding/xml"
+	"errors"
 	"fmt"
+	"io"
+	"net/http"
 )
 
 // https://datatracker.ietf.org/doc/html/rfc4918#section-14.20
@@ -30,11 +34,11 @@ type Prop struct {
 type Any struct {
 	XMLName xml.Name   `xml:""`
 	Content []byte     `xml:",innerxml"`
-	Attrs   []xml.Attr `xml:",attr,omitempty"`
+	Attr    []xml.Attr `xml:",attr,omitempty"`
 }
 
 // https://tools.ietf.org/html/rfc4918#section-15.9
-type ResourceType struct {
+type resourceType struct {
 	XMLName       xml.Name `xml:"DAV: resourcetype"`
 	ResourceTypes []Any    `xml:",any"`
 }
@@ -60,6 +64,15 @@ var (
 	supportedCalendarComponentSetName = xml.Name{Space: "urn:ietf:params:xml:ns:caldav", Local: "supported-calendar-component-set"}
 	compName                          = xml.Name{Space: "urn:ietf:params:xml:ns:caldav", Local: "comp"}
 	calendarTimezoneName              = xml.Name{Space: "urn:ietf:params:xml:ns:caldav", Local: "calendar-timezone"}
+
+	addressbookTypeName      = xml.Name{Space: "urn:ietf:params:xml:ns:carddav", Local: "addressbook"}
+	addressbookHomeSetName   = xml.Name{Space: "urn:ietf:params:xml:ns:carddav", Local: "addressbook-home-set"}
+	principalAddressName     = xml.Name{Space: "urn:ietf:params:xml:ns:carddav", Local: "principal-address"}
+	addressbookQueryName     = xml.Name{Space: "urn:ietf:params:xml:ns:carddav", Local: "addressbook-query"}
+	addressbookMultiGetName  = xml.Name{Space: "urn:ietf:params:xml:ns:carddav", Local: "addressbook-multiget"}
+	addressDataName          = xml.Name{Space: "urn:ietf:params:xml:ns:carddav", Local: "address-data"}
+	supportedAddressDataName = xml.Name{Space: "urn:ietf:params:xml:ns:carddav", Local: "supported-address-data"}
+	addressDataTypeName      = xml.Name{Space: "urn:ietf:params:xml:ns:carddav", Local: "address-data-type"}
 )
 
 var allpropInclusions = []xml.Name{
@@ -137,10 +150,13 @@ type PropertyUpdate struct {
 // preconditions/postconditions
 
 var (
+	validResourceTypeName           = xml.Name{Space: "DAV", Local: "valid-resourcetype"}
 	supportedCalendarDataName       = xml.Name{Space: "urn:ietf:params:xml:ns:caldav", Local: "supported-calendar-data"}
 	validCalendarDataName           = xml.Name{Space: "urn:ietf:params:xml:ns:caldav", Local: "valid-calendar-data"}
 	validCalendarObjectResourceName = xml.Name{Space: "urn:ietf:params:xml:ns:caldav", Local: "valid-calendar-object-resource"}
 	supportedCalendarComponentName  = xml.Name{Space: "urn:ietf:params:xml:ns:caldav", Local: "supported-calendar-component"}
+
+	validAddressDataName = xml.Name{Space: "urn:ietf:params:xml:ns:carddav", Local: "valid-address-data"}
 )
 
 // Report Sets
@@ -165,53 +181,44 @@ type calendarHomeSet struct {
 	Href    Href     `xml:"href"`
 }
 
-// https://datatracker.ietf.org/doc/html/rfc4791#section-9.5
-type mkCalendarRequest struct {
-	XMLName xml.Name `xml:"urn:ietf:params:xml:ns:caldav mkcalendar"`
-	Set     *Prop    `xml:"set>prop"`
-}
-
-type mkCalendarResponse struct {
-	XMLName  xml.Name `xml:"urn:ietf:params:xml:ns:caldav mkcalendar-response"`
-	PropStat PropStat `xml:"DAV: propstat"`
-}
-
-type calendarTimezone struct {
-	XMLName xml.Name `xml:"urn:ietf:params:xml:ns:caldav calendar-timezone"`
-	Content []byte   `xml:",chardata"`
-}
-
 // Calendar Report Elements
 //
 
 // https://datatracker.ietf.org/doc/html/rfc4791#section-9.5
-type CalendarQuery struct {
-	XMLName  xml.Name  `xml:"urn:ietf:params:xml:ns:caldav calendar-query"`
-	AllProp  *struct{} `xml:"DAV: allprop,omitempty"`
-	PropName *struct{} `xml:"DAV: propname,omitempty"`
-	Prop     *Prop     `xml:"DAV: prop,omitempty"`
-	Filter   filter    `xml:"filter"`
+type Query struct {
+	XMLName           xml.Name           `xml:""`
+	AllProp           *struct{}          `xml:"DAV: allprop,omitempty"`
+	PropName          *struct{}          `xml:"DAV: propname,omitempty"`
+	Prop              *Prop              `xml:"DAV: prop,omitempty"`
+	CalendarFilter    *calendarfilter    `xml:"urn:ietf:params:xml:ns:caldav filter,omitempty"`
+	AddressbookFilter *addressbookfilter `xml:"urn:ietf:params:xml:ns:carddav filter,omitempty"`
 	// TODO: timezone
 }
 
 // https://datatracker.ietf.org/doc/html/rfc4791#section-9.7
-type filter struct {
+type calendarfilter struct {
 	XMLName    xml.Name   `xml:"urn:ietf:params:xml:ns:caldav filter"`
 	CompFilter compFilter `xml:"comp-filter"`
 }
 
+// https://datatracker.ietf.org/doc/html/rfc4791#section-9.7
+type addressbookfilter struct {
+	XMLName    xml.Name              `xml:"urn:ietf:params:xml:ns:carddav filter"`
+	PropFilter addressbookPropFilter `xml:"prop-filter"`
+}
+
 // https://tools.ietf.org/html/rfc4791#section-9.7.1
 type compFilter struct {
-	XMLName      xml.Name     `xml:"urn:ietf:params:xml:ns:caldav comp-filter"`
-	Name         string       `xml:"name,attr"`
-	IsNotDefined *struct{}    `xml:"is-not-defined,omitempty"`
-	TimeRange    *timeRange   `xml:"time-range,omitempty"`
-	PropFilters  []propFilter `xml:"prop-filter,omitempty"`
-	CompFilters  []compFilter `xml:"comp-filter,omitempty"`
+	XMLName      xml.Name             `xml:"urn:ietf:params:xml:ns:caldav comp-filter"`
+	Name         string               `xml:"name,attr"`
+	IsNotDefined *struct{}            `xml:"is-not-defined,omitempty"`
+	TimeRange    *timeRange           `xml:"time-range,omitempty"`
+	PropFilters  []calendarPropFilter `xml:"prop-filter,omitempty"`
+	CompFilters  []compFilter         `xml:"comp-filter,omitempty"`
 }
 
 // https://tools.ietf.org/html/rfc4791#section-9.7.2
-type propFilter struct {
+type calendarPropFilter struct {
 	XMLName      xml.Name      `xml:"urn:ietf:params:xml:ns:caldav prop-filter"`
 	Name         string        `xml:"name,attr"`
 	IsNotDefined *struct{}     `xml:"is-not-defined,omitempty"`
@@ -220,9 +227,18 @@ type propFilter struct {
 	ParamFilter  []paramFilter `xml:"param-filter,omitempty"`
 }
 
+// https://tools.ietf.org/html/rfc4791#section-9.7.2
+type addressbookPropFilter struct {
+	XMLName      xml.Name      `xml:"urn:ietf:params:xml:ns:carddav prop-filter"`
+	Name         string        `xml:"name,attr"`
+	IsNotDefined *struct{}     `xml:"is-not-defined,omitempty"`
+	TextMatch    *textMatch    `xml:"text-match,omitempty"`
+	ParamFilter  []paramFilter `xml:"param-filter,omitempty"`
+}
+
 // https://tools.ietf.org/html/rfc4791#section-9.7.3
 type paramFilter struct {
-	XMLName      xml.Name   `xml:"urn:ietf:params:xml:ns:caldav param-filter"`
+	XMLName      xml.Name   `xml:""`
 	Name         string     `xml:"name,attr"`
 	IsNotDefined *struct{}  `xml:"is-not-defined,omitempty"`
 	TextMatch    *textMatch `xml:"text-match,omitempty"`
@@ -230,7 +246,7 @@ type paramFilter struct {
 
 // https://datatracker.ietf.org/doc/html/rfc4791#section-9.7.5
 type textMatch struct {
-	XMLName         xml.Name `xml:"urn:ietf:params:xml:ns:caldav text-match"`
+	XMLName         xml.Name `xml:""`
 	Text            string   `xml:",chardata"`
 	Collation       string   `xml:"collation,attr,omitempty"`
 	NegateCondition string   `xml:"negate-condition,attr,omitempty"`
@@ -244,8 +260,8 @@ type timeRange struct {
 }
 
 // https://datatracker.ietf.org/doc/html/rfc4791#section-9.5
-type CalendarMultiget struct {
-	XMLName  xml.Name  `xml:"urn:ietf:params:xml:ns:caldav calendar-multiget"`
+type Multiget struct {
+	XMLName  xml.Name  `xml:""`
 	AllProp  *struct{} `xml:"DAV: allprop,omitempty"`
 	PropName *struct{} `xml:"DAV: propname,omitempty"`
 	Prop     *Prop     `xml:"DAV: prop,omitempty"`
@@ -254,23 +270,98 @@ type CalendarMultiget struct {
 }
 
 type reportReq struct {
-	Query    *CalendarQuery
-	Multiget *CalendarMultiget
-	// TODO: CALDAV:free-busy-query
+	Query    *Query
+	Multiget *Multiget
 }
 
 func (r *reportReq) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
 	var v interface{}
 	switch start.Name {
-	case calendarQueryName:
-		r.Query = &CalendarQuery{}
+	case calendarQueryName, addressbookQueryName:
+		r.Query = &Query{}
 		v = r.Query
-	case calendarMultiGetName:
-		r.Multiget = &CalendarMultiget{}
+	case calendarMultiGetName, addressbookMultiGetName:
+		r.Multiget = &Multiget{}
 		v = r.Multiget
 	default:
-		return fmt.Errorf("caldav: unsupported REPORT root %q %q", start.Name.Space, start.Name.Local)
+		return &webDAVerror{http.StatusBadRequest, nil}
 	}
 
 	return d.DecodeElement(v, &start)
+}
+
+// mkcol and mkcalendar
+// https://datatracker.ietf.org/doc/html/rfc4791#section-9.5
+
+type mkColRequest struct {
+	XMLName xml.Name `xml:""`
+	Props   []Prop   `xml:"set>prop"`
+}
+
+func (r *Any) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
+	r.XMLName = start.Name
+	r.Attr = make([]xml.Attr, 0, 2)
+	for _, k := range start.Attr {
+		if k.Name.Space == "xmlns" || k.Name.Local == "xmlns" {
+			continue
+		} else {
+			r.Attr = append(r.Attr, k)
+		}
+	}
+	buf := bytes.NewBuffer(nil)
+	var depth int
+	for {
+		if tok, e := d.Token(); e != nil {
+			if errors.Is(e, io.EOF) {
+				r.Content = buf.Bytes()
+				return nil
+			} else {
+				return e
+			}
+		} else {
+			switch t := tok.(type) {
+			case xml.StartElement:
+				depth++
+				var attrs string
+				if s := t.Name.Space; s != "" {
+					attrs = fmt.Sprintf(" xmlns=\"%s\"", s)
+				}
+				for _, a := range t.Attr {
+					if a.Name.Space == "xmlns" || a.Name.Local == "xmlns" {
+						continue
+					} else {
+						attrs = attrs + fmt.Sprintf(" %s=\"%s\"", a.Name.Local, a.Value)
+					}
+				}
+				buf.WriteString(fmt.Sprintf("<%s%s>", t.Name.Local, attrs))
+			case xml.EndElement:
+				if depth > 0 {
+					buf.WriteString(fmt.Sprintf("</%s>", t.Name.Local))
+					depth--
+				}
+			case xml.CharData:
+				buf.Write(t)
+			}
+		}
+	}
+}
+
+type supportedAddressData struct {
+	XMLName   xml.Name `xml:"urn:ietf:params:xml:ns:carddav supported-address-data"`
+	DataTypes []Any
+}
+
+var (
+	mkcolRequestName      = xml.Name{Space: "DAV:", Local: "mkcol"}
+	mkcalendarRequestName = xml.Name{Space: "urn:ietf:params:xml:ns:caldav", Local: "mkcalendar"}
+)
+
+type mkColResponse struct {
+	XMLName   xml.Name   `xml:"DAV: mkcol-response"`
+	PropStats []PropStat `xml:"DAV: propstat"`
+}
+
+type mkCalendarResponse struct {
+	XMLName   xml.Name   `xml:"urn:ietf:params:xml:ns:caldav mkcalendar-response"`
+	PropStats []PropStat `xml:"DAV: propstat"`
 }

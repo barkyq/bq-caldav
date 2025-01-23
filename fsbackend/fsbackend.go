@@ -18,6 +18,7 @@ import (
 	"bq-caldav/core"
 
 	"github.com/emersion/go-ical"
+	"github.com/emersion/go-vcard"
 	"github.com/gabriel-vasile/mimetype"
 )
 
@@ -31,6 +32,8 @@ type FSBackend struct {
 
 func NewBackend(location string) *FSBackend {
 	if e := os.MkdirAll(path.Join(location, "calendars"), os.ModePerm); e != nil {
+		panic(e)
+	} else if e := os.MkdirAll(path.Join(location, "addressbook"), os.ModePerm); e != nil {
 		panic(e)
 	}
 
@@ -61,6 +64,11 @@ func (b *FSBackend) Get(r *http.Request) (body []byte, content_type string, err 
 	defer b.lock.Unlock()
 
 	p := path.Clean(r.URL.Path)[1:]
+	if p == "me.vcf" {
+		body, content_type = b.medotvcf()
+		err = nil
+		return
+	}
 
 	if path.Base(p) == "props.xml" {
 		err = core.WebDAVerror(http.StatusNotFound, nil)
@@ -68,7 +76,7 @@ func (b *FSBackend) Get(r *http.Request) (body []byte, content_type string, err 
 		err = core.WebDAVerror(http.StatusNotFound, nil)
 	} else if fi.IsDir(); e != nil {
 		err = core.WebDAVerror(http.StatusMethodNotAllowed, nil)
-	} else if etag, mt, _, br, e := b.getETagMTCLBody(p); e != nil {
+	} else if etag, mt, _, b, e := b.getETagMTCLBody(p); e != nil {
 		// potentially bubble up to internal server error
 		// but probably not
 		log.Println("unexpected error: ", e.Error())
@@ -77,9 +85,30 @@ func (b *FSBackend) Get(r *http.Request) (body []byte, content_type string, err 
 		err = e
 	} else {
 		content_type = mt.String()
-		body = br
+		body = b
 	}
 	return
+}
+
+func (b *FSBackend) medotvcf() (body []byte, content_type string) {
+	me := vcard.Card{}
+	if f, e := b.fsys.Open("me.vcf"); e != nil {
+		//
+	} else if m, e := vcard.NewDecoder(f).Decode(); e != nil {
+		//
+	} else {
+		me = m
+		goto jump
+	}
+
+	me.Set(vcard.FieldFormattedName, &vcard.Field{Value: "Default"})
+jump:
+	vcard.ToV4(me)
+	buf := bytes.NewBuffer(nil)
+	if e := vcard.NewEncoder(buf).Encode(me); e != nil {
+		panic(e)
+	}
+	return buf.Bytes(), "text/vcard"
 }
 
 // DELETE
@@ -103,19 +132,21 @@ func (b *FSBackend) Delete(r *http.Request) (err error) {
 	return nil
 }
 
-// MKCALENDAR
-func (b *FSBackend) MkCalendar(r *http.Request, prop_req *core.Prop) (resp core.PropStat, err error) {
+// MKCOL
+func (b *FSBackend) MkCol(r *http.Request, prop_req []core.Prop) (resp []core.PropStat, err error) {
 	b.lock.Lock()
 	defer b.lock.Unlock()
 
 	p := path.Clean(r.URL.Path)[1:]
 	if _, e := fs.Stat(b.fsys, p); !errors.Is(e, fs.ErrNotExist) {
 		err = core.WebDAVerror(http.StatusConflict, &xml.Name{Space: "DAV:", Local: "resource-must-be-null"})
-	} else if rsp, pw, e := core.CheckMkCalendarReq(prop_req); e != nil {
+	} else if rsp, pw, e := core.CheckMkColReq(getScope(r.URL.Path), prop_req); e != nil {
 		err = e
 	} else {
-		// write the new props.xml file
-		if e := b.mkdir(p); e != nil {
+		resp = rsp
+		if len(resp) != 0 {
+			return
+		} else if e := b.mkdir(p); e != nil {
 			err = e
 		} else if f, e := b.create(path.Join(p, "props.xml")); e != nil {
 			err = e
@@ -123,8 +154,6 @@ func (b *FSBackend) MkCalendar(r *http.Request, prop_req *core.Prop) (resp core.
 			err = e
 		} else if e := xml.NewEncoder(f).Encode(pw); e != nil {
 			err = e
-		} else {
-			resp = rsp
 		}
 	}
 	return
@@ -138,11 +167,38 @@ func (b *FSBackend) Put(r *http.Request) (err error) {
 	p := path.Clean(r.URL.Path)[1:]
 	if _, e := fs.Stat(b.fsys, path.Dir(p)); e != nil {
 		err = core.WebDAVerror(http.StatusConflict, nil)
-	} else if cal, e := core.CheckCalendarDataSupportedAndValid(r.Header.Get("Content-Type"), r.Body); e != nil {
-		err = e
-	} else if body, e := b.checkCalendarObject(r, p, cal); e != nil {
-		err = e
-	} else if f, e := b.create(p); e != nil {
+	}
+
+	var body io.Reader
+	switch path.Dir(path.Dir(p)) {
+	case "calendars":
+		if cal, e := core.CheckCalendarDataSupportedAndValid(r.Header.Get("Content-Type"), r.Body); e != nil {
+			err = e
+		} else if b, e := b.checkCalendarObject(r, p, cal); e != nil {
+			err = e
+		} else {
+			body = b
+		}
+	case "addressbook":
+		if card, e := core.CheckAddressDataSupportedAndValid(r.Header.Get("Content-Type"), r.Body); e != nil {
+			err = e
+		} else if b, e := b.checkAddressObject(r, p, card); e != nil {
+			err = e
+		} else {
+			body = b
+		}
+	default:
+		switch getScope(r.URL.Path) {
+		case core.CalendarScope:
+			err = core.WebDAVerror(http.StatusForbidden, &xml.Name{Space: "urn:ietf:params:xml:ns:caldav", Local: "calendar-collection-location-ok"})
+		case core.AddressbookScope:
+			err = core.WebDAVerror(http.StatusForbidden, &xml.Name{Space: "urn:ietf:params:xml:ns:carddav", Local: "addressbook-collection-location-ok"})
+		}
+		if err != nil {
+			return
+		}
+	}
+	if f, e := b.create(p); e != nil {
 		err = e
 	} else if _, e := io.Copy(f, body); e != nil {
 		err = e
@@ -178,6 +234,28 @@ func (b *FSBackend) checkCalendarObject(r *http.Request, p string, cal *ical.Cal
 	// max-instances for recurring events
 	// max-date-time, min-date-time
 	// max-attendees-per-instance
+	// max-resource-size
+	return buf, nil
+}
+
+func (b *FSBackend) checkAddressObject(r *http.Request, p string, card vcard.Card) (io.Reader, error) {
+	// if `if-match` or `if-none-match` fails return 412 precondition failed
+	// https://datatracker.ietf.org/doc/html/rfc7232
+	//
+	etag, _, _, _, _ := b.getETagMTCLBody(p)
+	// don't bother checking the error; etag == "" if the file does not exist
+
+	if e := core.IfMatchifNoneMatch(etag, r.Header.Get("If-Match"), r.Header.Get("If-None-Match")); e != nil {
+		return nil, e
+	}
+
+	buf := bytes.NewBuffer(nil)
+
+	if e := vcard.NewEncoder(buf).Encode(card); e != nil {
+		return nil, core.WebDAVerror(http.StatusInternalServerError, nil)
+	}
+	// do not bother checking
+	// uid-conflict
 	// max-resource-size
 	return buf, nil
 }
@@ -275,9 +353,24 @@ func (b *FSBackend) propFindResource(p string, fi fs.FileInfo, pf *core.PropFind
 		p = "/" + p
 	}
 	return &core.Response{
-		PropStats: core.CleanProps(props_Found, pf.PropName, pf.Include, pf.AllProp, pf.Prop),
+		PropStats: core.CleanProps(getScope(p), props_Found, pf.PropName, pf.Include, pf.AllProp, pf.Prop),
 		Hrefs:     []core.Href{{Target: p}},
 	}, nil
+}
+
+func getScope(p string) core.Scope {
+	if p == "/" {
+		return core.CalendarScope | core.AddressbookScope
+	}
+	components := strings.Split(strings.TrimPrefix(p, "/"), "/")
+	switch components[0] {
+	case "calendars":
+		return core.CalendarScope
+	case "addressbook":
+		return core.AddressbookScope
+	default:
+		return 0
+	}
 }
 
 func (b *FSBackend) propFindDir(p string) (props_Found []core.Any, err error) {
@@ -285,23 +378,28 @@ func (b *FSBackend) propFindDir(p string) (props_Found []core.Any, err error) {
 		return core.DefaultPropsRoot(), nil
 	}
 
-	if p == "calendars" {
+	if p == "calendars" || p == "addressbook" {
 		return core.DefaultPropsHomeSet(), nil
 	}
 
-	if d, _ := path.Split(p); d != "calendars/" {
+	if d, _ := path.Split(p); d != "calendars/" && d != "addressbook/" {
 		return nil, &notFound{}
+	} else {
+		prop := &core.Prop{}
+		if f, e := b.fsys.Open(path.Join(p, "props.xml")); e != nil {
+			return nil, &notFound{}
+		} else if e := xml.NewDecoder(f).Decode(prop); e != nil {
+			// bubble up internal server error
+			return nil, e
+		}
+		switch d {
+		case "calendars/":
+			props_Found = core.MarshalPropsCalendarCollection(prop)
+		case "addressbook/":
+			props_Found = core.MarshalPropsAddressbookCollection(prop)
+		}
 	}
 
-	prop := &core.Prop{}
-	if f, e := b.fsys.Open(path.Join(p, "props.xml")); e != nil {
-		return nil, &notFound{}
-	} else if e := xml.NewDecoder(f).Decode(prop); e != nil {
-		// bubble up internal server error
-		return nil, e
-	}
-
-	props_Found = core.MarshalPropsCalendarCollection(prop)
 	return
 }
 
@@ -351,11 +449,26 @@ func (b *FSBackend) propFindFile(p string, fi fs.FileInfo) (props_Found []core.A
 }
 
 // REPORT calendar-query
-func (b *FSBackend) Query(r *http.Request, query *core.CalendarQuery, depth byte) (ms *core.MultiStatus, err error) {
+func (b *FSBackend) Query(r *http.Request, query *core.Query, depth byte) (ms *core.MultiStatus, err error) {
+	query_scope := query.Scope()
+	switch getScope(r.URL.Path) {
+	case core.CalendarScope:
+		if query_scope != core.CalendarScope {
+			err = core.WebDAVerror(http.StatusBadRequest, nil)
+			return
+		}
+	case core.AddressbookScope:
+		if query_scope != core.AddressbookScope {
+			err = core.WebDAVerror(http.StatusBadRequest, nil)
+			return
+		}
+	}
+
 	b.lock.Lock()
 	defer b.lock.Unlock()
 
 	ms = &core.MultiStatus{}
+
 	p := path.Clean(r.URL.Path)[1:]
 	if p == "" {
 		p = "."
@@ -402,7 +515,7 @@ func (b *FSBackend) Query(r *http.Request, query *core.CalendarQuery, depth byte
 	return
 }
 
-func (b *FSBackend) queryFile(p string, fi fs.FileInfo, query *core.CalendarQuery) (resp *core.Response, match bool, err error) {
+func (b *FSBackend) queryFile(p string, fi fs.FileInfo, query *core.Query) (resp *core.Response, match bool, err error) {
 	var file io.Reader
 	var props_Found []core.Any
 	if pf, f, e := b.propFindFile(p, fi); e != nil {
@@ -413,32 +526,47 @@ func (b *FSBackend) queryFile(p string, fi fs.FileInfo, query *core.CalendarQuer
 		props_Found = pf
 	}
 
-	// now check if the file matches the query
-	if cal, e := ical.NewDecoder(file).Decode(); e != nil {
-		err = core.WebDAVerror(http.StatusInternalServerError, nil)
-		return
-	} else if m, e := core.MatchCalendarWithQuery(cal, query); e != nil {
-		// webdav error such as: not-implemented or bad-request
-		err = e
-		return
-	} else if !m {
-		return
-	} else if a, e := core.CalendarData(cal, query.Prop); e != nil {
-		// internal server error or webdav not-implemented
-		err = e
-		return
-	} else if a != nil {
-		props_Found = append(props_Found, *a)
+	switch query.Scope() {
+	case core.CalendarScope:
+		// now check if the file matches the query
+		if cal, e := ical.NewDecoder(file).Decode(); e != nil {
+			err = core.WebDAVerror(http.StatusInternalServerError, nil)
+			return
+		} else if m, e := core.MatchCalendarWithQuery(cal, query); e != nil {
+			// webdav error such as: not-implemented or bad-request
+			err = e
+			return
+		} else if !m {
+			return
+		} else if a, e := core.CalendarData(cal, query.Prop); e != nil {
+			// internal server error or webdav not-implemented
+			err = e
+			return
+		} else if a != nil {
+			props_Found = append(props_Found, *a)
+		}
+	case core.AddressbookScope:
+		// todo filter via query
+		if card, e := vcard.NewDecoder(file).Decode(); e != nil {
+			return
+		} else if a, e := core.AddressData(card, query.Prop); e != nil {
+			return
+		} else if a != nil {
+			props_Found = append(props_Found, *a)
+		}
+	default:
+		panic("unknown scope")
 	}
-
-	// clean up the props
-	propstats := core.CleanProps(props_Found, query.PropName, nil, query.AllProp, query.Prop)
 
 	if p == "." {
 		p = "/"
 	} else {
 		p = "/" + p
 	}
+
+	// clean up the props
+	propstats := core.CleanProps(getScope(p), props_Found, query.PropName, nil, query.AllProp, query.Prop)
+
 	return &core.Response{
 		PropStats: propstats,
 		Hrefs:     []core.Href{{Target: p}},
@@ -446,7 +574,21 @@ func (b *FSBackend) queryFile(p string, fi fs.FileInfo, query *core.CalendarQuer
 }
 
 // REPORT calendar-multiget
-func (b *FSBackend) Multiget(r *http.Request, multiget *core.CalendarMultiget) (ms *core.MultiStatus, err error) {
+func (b *FSBackend) Multiget(r *http.Request, multiget *core.Multiget) (ms *core.MultiStatus, err error) {
+	scope := multiget.Scope()
+	switch getScope(r.URL.Path) {
+	case core.CalendarScope:
+		if scope != core.CalendarScope {
+			err = core.WebDAVerror(http.StatusBadRequest, nil)
+			return
+		}
+	case core.AddressbookScope:
+		if scope != core.AddressbookScope {
+			err = core.WebDAVerror(http.StatusBadRequest, nil)
+			return
+		}
+	}
+
 	b.lock.Lock()
 	defer b.lock.Unlock()
 
@@ -486,7 +628,7 @@ jump:
 	return
 }
 
-func (b *FSBackend) multigetFile(p string, fi fs.FileInfo, multiget *core.CalendarMultiget) (resp *core.Response, err error) {
+func (b *FSBackend) multigetFile(p string, fi fs.FileInfo, multiget *core.Multiget) (resp *core.Response, err error) {
 	for _, href := range multiget.Hrefs {
 		if path.Clean(href.Target)[1:] == p {
 			goto jump
@@ -504,20 +646,38 @@ jump:
 		props_Found = pf
 	}
 
-	// now write calendar-data
-	if cal, e := ical.NewDecoder(file).Decode(); e != nil {
-		return
-	} else if a, e := core.CalendarData(cal, multiget.Prop); e != nil {
-		return
-	} else if a != nil {
-		props_Found = append(props_Found, *a)
+	switch multiget.Scope() {
+	case core.CalendarScope:
+		// now write calendar-data
+		if cal, e := ical.NewDecoder(file).Decode(); e != nil {
+			return
+		} else if a, e := core.CalendarData(cal, multiget.Prop); e != nil {
+			return
+		} else if a != nil {
+			props_Found = append(props_Found, *a)
+		}
+	case core.AddressbookScope:
+		if card, e := vcard.NewDecoder(file).Decode(); e != nil {
+			return
+		} else if a, e := core.AddressData(card, multiget.Prop); e != nil {
+			return
+		} else if a != nil {
+			props_Found = append(props_Found, *a)
+		}
+	default:
+		panic("unknown scope")
 	}
 
 	// clean up the props
-	propstats := core.CleanProps(props_Found, multiget.PropName, nil, multiget.AllProp, multiget.Prop)
+	if p == "." {
+		p = "/"
+	} else {
+		p = "/" + p
+	}
+	propstats := core.CleanProps(getScope(p), props_Found, multiget.PropName, nil, multiget.AllProp, multiget.Prop)
 	return &core.Response{
 		PropStats: propstats,
-		Hrefs:     []core.Href{{Target: "/" + p}},
+		Hrefs:     []core.Href{{Target: p}},
 	}, nil
 }
 
@@ -526,23 +686,35 @@ func (b *FSBackend) Options(r *http.Request) (caps []string, allow []string) {
 	p := path.Clean(r.URL.Path)
 
 	if p == "/" {
-		caps = []string{"1", "3", "calendar-access"}
+		caps = []string{"1", "3", "calendar-access", "addressbook", "extended-mkcol"}
 		allow = []string{http.MethodOptions, "PROPFIND", "REPORT"}
 		return
+	} else if p == "/me.vcf" {
+		caps = []string{"1"}
+		allow = []string{http.MethodOptions, "PROPFIND", "GET", "HEAD", "PUT", "DELETE"}
 	}
 
 	p = p[1:]
 	components := strings.Split(p, "/")
 	if components[0] == "calendars" {
-		caps = []string{"1", "3", "calendar-access"}
+		caps = []string{"1", "3", "calendar-access", "extended-mkcol"}
 		switch len(components) {
 		case 1: // path targets /calendars
 			allow = []string{http.MethodOptions, "PROPFIND", "REPORT"}
 		case 2: // path targets /calendars/X
-			allow = []string{http.MethodOptions, "PROPFIND", "REPORT", "PROPPATCH", "MKCALENDAR", "DELETE"}
+			allow = []string{http.MethodOptions, "PROPFIND", "REPORT", "PROPPATCH", "MKCOL", "MKCALENDAR", "DELETE"}
 		case 3: // path targets /calendars/X/Y
 			allow = []string{http.MethodOptions, "PROPFIND", "REPORT", "DELETE", "PUT", "GET", "HEAD"}
-		default:
+		}
+	} else if components[0] == "addressbook" {
+		caps = []string{"1", "3", "addressbook", "extended-mkcol"}
+		switch len(components) {
+		case 1: // path targets /addressbook
+			allow = []string{http.MethodOptions, "PROPFIND", "REPORT"}
+		case 2: // path targets /addressbook/X
+			allow = []string{http.MethodOptions, "PROPFIND", "REPORT", "PROPPATCH", "MKCOL", "DELETE"}
+		case 3: // path targets /addressbook/X/Y
+			allow = []string{http.MethodOptions, "PROPFIND", "REPORT", "DELETE", "PUT", "GET", "HEAD"}
 		}
 	}
 	return

@@ -14,6 +14,7 @@ type Wrapper struct {
 
 func (wrapper *Wrapper) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	log.Println(r.Method, r.RequestURI, r.Header.Get("User-Agent"), r.Header.Get("Accept-Encoding"))
+	// r.Body = io.NopCloser(io.TeeReader(r.Body, os.Stderr))
 	wrapper.Handler.ServeHTTP(&gzipWrapper{w, r, 200}, r)
 }
 
