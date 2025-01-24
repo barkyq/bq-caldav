@@ -1,30 +1,34 @@
-# simple personal caldav server
+# simple personal caldav and carddav server
 
 - supports a single WebDAV principal (at `"/"`)
 - supports a single calendar-home-set (at `"/calendars/"`)
+- supports a single addressbook-home-set (at `"/addressbook/"`)
 - supports gzip compression of responses
-- supported-component-set contains only `VEVENT`
+- calendar collection supported-component-set contains only `VEVENT`
 
 ## running
 
-run the binary with the flag `-backend path/to/backend` to specify where the server will store the calendar files.
+run the binary with the flag `-backend path/to/backend` to specify where the server will store the calendar and addressbook files.
 
 ## backend
 
-Currently the only backend implementation is `fsbackend` which transparently stores the calendar objects in a directory structure:
+Currently the only backend implementation is `fsbackend` which transparently stores the resources in a directory structure:
 
 ```
 backend/
-└── calendars/
-    ├── example-calendar-collection/
-    │   ├── example-calendar-object.ics
-    │   └── props.xml
-    └── another-calendar-collection/
-        ├── another-calendar-object.ics
-        └── props.xml
+├── calendars/
+│   ├── example-calendar-collection/
+│   │   ├── example-calendar-object.ics
+│   │   └── props.xml
+│   └── another-calendar-collection/
+│       ├── another-calendar-object.ics
+│       └── props.xml
+└── addressbook/
+    ├── example-vcard-object.vcf
+    └── props.xml
 ```
 
-Custom properties for the calendar-collection are stored in `props.xml` file, which is initialized by `MKCALENDAR` commands, and is updated by `PROPPATCH` command.
+Custom properties for the collections are stored in `props.xml` file, which is initialized by extended `MKCOL` or `MKCALENDAR` commands, and is updated by `PROPPATCH` command.
 
 The `props.xml` file has the following document structure:
 
@@ -79,6 +83,10 @@ server {
 	server_name caldav.example.com;
 
 	location /.well-known/caldav {
+		return 301 https://$host/;
+	}
+
+	location /.well-known/carddav {
 		return 301 https://$host/;
 	}
 	
