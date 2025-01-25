@@ -24,7 +24,7 @@ var (
 	statusForbidden                                      = statusHelper(http.StatusForbidden)
 	principalURL, currentUserPrincipal, principalAddress = newPrincipalURL("/")
 	defaultSupportedAddressData                          = supportedAddressDataHelper("3.0", "4.0")
-	defaultSupportedCalendarComponentSet                 = supportedCalendarComponentSetHelper("VEVENT", "VJOURNAL")
+	defaultSupportedCalendarComponentSet                 = supportedCalendarComponentSetHelper("VEVENT", "VTODO", "VJOURNAL")
 	defaultCalendarHomeSet                               = newCalendarHomeSet("/calendars/")
 	defaultAddressbookHomeSet                            = newAddressbookHomeSet("/addressbook/")
 	collectionResourceType                               = newResourceType(collectionTypeName)
@@ -347,7 +347,6 @@ func MarshalPropsAddressbookCollection(custom *Prop) (props_Found []Any) {
 }
 
 // comp filter
-
 func MatchCalendarWithQuery(cal *ical.Calendar, query *Query) (bool, error) {
 	if query.CalendarFilter == nil {
 		return false, fmt.Errorf("query is unset")
@@ -361,13 +360,6 @@ func MatchCalendarWithQuery(cal *ical.Calendar, query *Query) (bool, error) {
 func matchCompFilterWithComp(cf compFilter, comp *ical.Component) (match bool, err error) {
 	switch {
 	case cf.TimeRange != nil:
-		if comp.Name != ical.CompEvent {
-			// time range only implemented on
-			// event components
-			return false, &webDAVerror{
-				Code: http.StatusNotImplemented,
-			}
-		}
 		var start_time, end_time time.Time
 		if cf.TimeRange.Start != "" {
 			if t, e := time.Parse(dateWithUTCTimeFormat, cf.TimeRange.Start); e != nil {
@@ -387,11 +379,11 @@ func matchCompFilterWithComp(cf compFilter, comp *ical.Component) (match bool, e
 				end_time = t
 			}
 		}
-		if metadata, e := parseEvent(comp); e != nil {
+		if data, e := parseCalendarComponent(comp); e != nil {
 			return false, &webDAVerror{
 				Code: http.StatusInternalServerError,
 			}
-		} else if metadata.Intersect(start_time, end_time) {
+		} else if data.Intersect(start_time, end_time) {
 			return true, nil
 		} else {
 			return false, nil
@@ -869,7 +861,7 @@ func CheckMkColReq(scope Scope, prop_req []Prop) (resp []PropStat, prop_write Pr
 						for _, attr := range t.Attr {
 							if name, val := attr.Name.Local, attr.Value; name != "name" {
 								continue
-							} else if val != ical.CompEvent && val != ical.CompJournal {
+							} else if val != ical.CompEvent && val != ical.CompJournal && val != ical.CompToDo {
 								check = false
 								break
 							}
@@ -884,7 +876,7 @@ func CheckMkColReq(scope Scope, prop_req []Prop) (resp []PropStat, prop_write Pr
 							}},
 						},
 						Status:              statusForbidden,
-						ResponseDescription: "only VEVENT and VJOURNAL collections are supported",
+						ResponseDescription: "only VEVENT, VTODO and VJOURNAL collections are supported",
 					})
 				} else {
 					write_props = append(write_props, a)

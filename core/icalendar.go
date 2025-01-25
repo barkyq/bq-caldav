@@ -13,28 +13,21 @@ import (
 	"github.com/teambition/rrule-go"
 )
 
-type eventData struct {
+type compData struct {
 	uid          string
 	sequence     int64
 	dtstart      time.Time
 	duration     time.Duration
 	rset         *rrule.Set
 	recurrenceid time.Time
-	event        *ical.Component
-}
-
-type journalData struct {
-	uid          string
-	dtstart      time.Time
 	summary      string
-	descriptions []string
-	journal      *ical.Component
+	description  string
+	comp         *ical.Component
 }
 
-type calendarMetaData struct {
+type CalendarMetaData struct {
 	ComponentType string
-	events        []eventData
-	journal       []journalData
+	comps         []compData
 }
 
 const dateFormat = "20060102"
@@ -51,36 +44,44 @@ var symbolmap = map[string]int64{
 	"S": 60,
 }
 
-func (edt *eventData) Intersect(min time.Time, max time.Time) (ok bool) {
+func intersect_helper(min time.Time, max time.Time, start time.Time, duration time.Duration) bool {
+	if max.IsZero() && start.Add(duration).After(min) || start.Equal(min) && duration == 0 {
+		return true
+	}
 
+	if min.IsZero() && start.Before(max) {
+		return true
+	}
+
+	if start.Before(max) && start.Add(duration).After(min) || start.Equal(min) && duration == 0 {
+		return true
+	}
+	return false
+}
+
+func rrule_intersect_helper(min time.Time, max time.Time, rset *rrule.Set, duration time.Duration) bool {
+	if t := rset.After(min.Add(-duration), false); !t.IsZero() {
+		if max.IsZero() && t.Add(duration).After(min) || t.Equal(min) && duration == 0 {
+			return true
+		}
+		if t.Before(max) && t.Add(duration).After(min) {
+			return true
+		}
+	}
+	return false
+}
+
+func (data *compData) Intersect(min time.Time, max time.Time) (ok bool) {
 	// try first event
-	if max.IsZero() && edt.dtstart.Add(edt.duration).After(min) || edt.dtstart.Equal(min) && edt.duration == 0 {
+	if intersect_helper(min, max, data.dtstart, data.duration) {
 		return true
 	}
-
-	if min.IsZero() && edt.dtstart.Before(max) {
-		return true
-	}
-
-	if edt.dtstart.Before(max) && edt.dtstart.Add(edt.duration).After(min) || edt.dtstart.Equal(min) && edt.duration == 0 {
-		return true
-	}
-
 	// now try recurrence; safe for unbounded RRULE
-	if min.IsZero() {
-		return
+	if min.IsZero() || data.rset == nil {
+		return false
 	}
 
-	if t := edt.rset.After(min.Add(-edt.duration), false); !t.IsZero() {
-		if max.IsZero() && t.Add(edt.duration).After(min) || t.Equal(min) && edt.duration == 0 {
-			return true
-		}
-		if t.Before(max) && t.Add(edt.duration).After(min) {
-			return true
-		}
-	}
-
-	return
+	return rrule_intersect_helper(min, max, data.rset, data.duration)
 }
 
 func parseDuration(val string) (dur time.Duration, err error) {
@@ -107,12 +108,12 @@ func parseDuration(val string) (dur time.Duration, err error) {
 	return time.Duration(seconds) * time.Second, nil
 }
 
-func parseJournal(comp *ical.Component) (jdt *journalData, err error) {
-	jdt = &journalData{}
+func parseJournal(comp *ical.Component) (data *compData, err error) {
+	data = &compData{}
 
 	// get UID
 	if val := comp.Props.Get(ical.PropUID); val != nil {
-		jdt.uid = val.Value
+		data.uid = val.Value
 	} else {
 		err = fmt.Errorf("parse error")
 		return
@@ -126,33 +127,41 @@ func parseJournal(comp *ical.Component) (jdt *journalData, err error) {
 			err = e
 			return
 		} else {
-			jdt.dtstart = t
+			data.dtstart = t
+		}
+
+		switch val.ValueType() {
+		case ical.ValueDateTime:
+			data.duration = 0
+		case ical.ValueDate:
+			data.duration = 24 * time.Hour
 		}
 	}
 
 	repl := strings.NewReplacer("\\n", "\n", "\\,", ",", "\\;", ";", "\\\\", "\\")
 	// get summary
 	if p := comp.Props.Get(ical.PropSummary); p != nil {
-		jdt.summary = repl.Replace(p.Value)
+		data.summary = repl.Replace(p.Value)
 	}
 
 	// get descriptions
 	descriptions := comp.Props.Values(ical.PropDescription)
-	jdt.descriptions = make([]string, len(descriptions))
-	for k, v := range descriptions {
-		jdt.descriptions[k] = repl.Replace(v.Value)
+	b := bytes.NewBuffer(nil)
+	for _, v := range descriptions {
+		b.WriteString(repl.Replace(v.Value))
 	}
-	jdt.journal = comp
+	data.description = b.String()
+	data.comp = comp
 	return
 }
 
-func parseEvent(comp *ical.Component) (timedata *eventData, err error) {
-	timedata = &eventData{}
+func parseEvent(comp *ical.Component) (data *compData, err error) {
+	data = &compData{}
 	err = fmt.Errorf("parse error")
 
 	// get uid
 	if val := comp.Props.Get(ical.PropUID); val != nil {
-		timedata.uid = val.Value
+		data.uid = val.Value
 	} else {
 		return
 	}
@@ -164,10 +173,10 @@ func parseEvent(comp *ical.Component) (timedata *eventData, err error) {
 			err = e
 			return
 		} else {
-			timedata.dtstart = t
+			data.dtstart = t
 		}
 
-		rrule_buf.WriteString(fmt.Sprintf("%s:%s\n", val.Name, timedata.dtstart.Format(dateWithUTCTimeFormat)))
+		rrule_buf.WriteString(fmt.Sprintf("%s:%s\n", val.Name, data.dtstart.Format(dateWithUTCTimeFormat)))
 	} else {
 		// need DTSTART
 		return
@@ -179,7 +188,7 @@ func parseEvent(comp *ical.Component) (timedata *eventData, err error) {
 			err = e
 			return
 		} else {
-			timedata.sequence = s
+			data.sequence = s
 		}
 	}
 
@@ -189,21 +198,21 @@ func parseEvent(comp *ical.Component) (timedata *eventData, err error) {
 			err = e
 			return
 		} else {
-			timedata.duration = d
+			data.duration = d
 		}
 	} else if comp.Props.Get(ical.PropDateTimeEnd); val != nil {
 		if t, e := val.DateTime(nil); e != nil {
 			err = e
 			return
 		} else {
-			timedata.duration = t.Sub(timedata.dtstart)
+			data.duration = t.Sub(data.dtstart)
 		}
 	} else {
 		switch comp.Props.Get(ical.PropDateTimeStart).ValueType() {
 		case ical.ValueDate:
-			timedata.duration = 24 * time.Hour
+			data.duration = 24 * time.Hour
 		default:
-			timedata.duration = 0
+			data.duration = 0
 		}
 	}
 
@@ -213,7 +222,7 @@ func parseEvent(comp *ical.Component) (timedata *eventData, err error) {
 			err = e
 			return
 		} else {
-			timedata.recurrenceid = t
+			data.recurrenceid = t
 		}
 	}
 	// recurrence rule
@@ -258,15 +267,232 @@ func parseEvent(comp *ical.Component) (timedata *eventData, err error) {
 	if r, e := rrule.StrToRRuleSet(rrule_buf.String()); e != nil {
 		return
 	} else {
-		timedata.rset = r
+		data.rset = r
 	}
 
-	timedata.event = comp
+	repl := strings.NewReplacer("\\n", "\n", "\\,", ",", "\\;", ";", "\\\\", "\\")
+	// get summary
+	if p := comp.Props.Get(ical.PropSummary); p != nil {
+		data.summary = repl.Replace(p.Value)
+	}
+	// get description
+	if p := comp.Props.Get(ical.PropDescription); p != nil {
+		data.description = repl.Replace(p.Value)
+	}
+	data.comp = comp
 	err = nil
 	return
 }
 
-func ParseCalendarObjectResource(cal *ical.Calendar) (metadata *calendarMetaData, err error) {
+func parseTodo(comp *ical.Component) (data *compData, err error) {
+	data = &compData{}
+	err = fmt.Errorf("parse error")
+
+	// get uid
+	if val := comp.Props.Get(ical.PropUID); val != nil {
+		data.uid = val.Value
+	} else {
+		return
+	}
+
+	rrule_buf := bytes.NewBuffer(nil)
+
+	if val := comp.Props.Get(ical.PropDateTimeStart); val != nil {
+		if t, e := val.DateTime(nil); e != nil {
+			err = e
+			return
+		} else {
+			data.dtstart = t
+		}
+	}
+
+	// get due OR duration
+	if val := comp.Props.Get(ical.PropDue); val != nil {
+		var due time.Time
+		if t, e := val.DateTime(nil); e != nil {
+			err = e
+			return
+		} else {
+			due = t
+		}
+		if data.dtstart.IsZero() {
+			data.dtstart = due
+		} else {
+			data.duration = due.Sub(data.dtstart)
+		}
+	} else if val := comp.Props.Get(ical.PropDuration); val != nil {
+		if data.dtstart.IsZero() {
+			// cannot have duration without dtstart
+			return
+		} else if d, e := parseDuration(val.Value); e != nil {
+			err = e
+			return
+		} else {
+			data.duration = d
+		}
+	}
+
+	if !data.dtstart.IsZero() {
+		// potentially an rrule
+		rrule_buf.WriteString(fmt.Sprintf("%s:%s\n", "DTSTART", data.dtstart.Format(dateWithUTCTimeFormat)))
+
+		if val := comp.Props.Get(ical.PropRecurrenceRule); val != nil {
+			rrule_buf.WriteString(fmt.Sprintf("%s:%s\n", val.Name, val.Value))
+		}
+
+		if val := comp.Props.Get(ical.PropRecurrenceDates); val != nil {
+			rrule_buf.WriteString(fmt.Sprintf("%s", val.Name))
+			switch val.ValueType() {
+			case ical.ValueDate:
+				rrule_buf.WriteString(fmt.Sprintf(";VALUE=DATE:%s", val.Value))
+			case ical.ValueDateTime:
+				if tzid := val.Params.Get(ical.ParamTimezoneID); tzid != "" {
+					rrule_buf.WriteString(fmt.Sprintf(";TZID=%s", tzid))
+				}
+				rrule_buf.WriteString(fmt.Sprintf(":%s\n", val.Value))
+			case ical.ValuePeriod:
+				// do not allow VALUE=PERIOD
+				return
+			default:
+				// not allowed by RFC
+				return
+			}
+		}
+
+		if val := comp.Props.Get(ical.PropExceptionDates); val != nil {
+			rrule_buf.WriteString(fmt.Sprintf("%s", val.Name))
+			switch val.ValueType() {
+			case ical.ValueDate:
+				rrule_buf.WriteString(fmt.Sprintf(";VALUE=DATE:%s", val.Value))
+			case ical.ValueDateTime:
+				if tzid := val.Params.Get(ical.ParamTimezoneID); tzid != "" {
+					rrule_buf.WriteString(fmt.Sprintf(";TZID=%s", tzid))
+				}
+				rrule_buf.WriteString(fmt.Sprintf(":%s\n", val.Value))
+			default:
+				// not allowed by RFC
+				return
+			}
+		}
+		if r, e := rrule.StrToRRuleSet(rrule_buf.String()); e != nil {
+			return
+		} else {
+			data.rset = r
+		}
+	} else {
+		// dtstart was not set yet; assume completed/created handling
+		var created, completed time.Time
+		if val := comp.Props.Get(ical.PropCompleted); val != nil {
+			if t, e := val.DateTime(nil); e != nil {
+				err = e
+				return
+			} else {
+				completed = t
+			}
+		}
+		if val := comp.Props.Get(ical.PropCreated); val != nil {
+			if t, e := val.DateTime(nil); e != nil {
+				err = e
+				return
+			} else {
+				created = t
+			}
+		}
+		if created.IsZero() {
+			data.dtstart = completed
+			data.duration = 0
+		} else if completed.IsZero() {
+			data.dtstart = created
+			data.duration = 0
+		} else {
+			data.dtstart = created
+			data.duration = completed.Sub(created)
+		}
+	}
+
+	if data.dtstart.IsZero() {
+		// still zero??
+		// then should match every filter, so make a wide window
+		data.dtstart = time.Date(1984, time.November, 11, 16, 20, 0, 0, nil)
+		// 200 years
+		data.duration = 1752000 * time.Hour
+	}
+
+	// get sequence
+	if val := comp.Props.Get(ical.PropSequence); val != nil {
+		if s, e := strconv.ParseInt(val.Value, 10, 64); e != nil {
+			err = e
+			return
+		} else {
+			data.sequence = s
+		}
+	}
+
+	// get recurrenceid
+	if val := comp.Props.Get(ical.PropRecurrenceID); val != nil {
+		if t, e := val.DateTime(nil); e != nil {
+			err = e
+			return
+		} else {
+			data.recurrenceid = t
+		}
+	}
+
+	repl := strings.NewReplacer("\\n", "\n", "\\,", ",", "\\;", ";", "\\\\", "\\")
+	// get summary
+	if p := comp.Props.Get(ical.PropSummary); p != nil {
+		data.summary = repl.Replace(p.Value)
+	}
+	// get description
+	if p := comp.Props.Get(ical.PropDescription); p != nil {
+		data.description = repl.Replace(p.Value)
+	}
+
+	data.comp = comp
+	err = nil
+	return
+}
+
+func parseCalendarComponent(comp *ical.Component) (data *compData, err error) {
+	err = &webDAVerror{
+		Code:      http.StatusForbidden,
+		Condition: &validCalendarObjectResourceName,
+	}
+
+	switch comp.Name {
+	case ical.CompEvent:
+		if edt, e := parseEvent(comp); e != nil {
+			return
+		} else {
+			data = edt
+		}
+	case ical.CompJournal:
+		if jdt, e := parseJournal(comp); e != nil {
+			return
+		} else {
+			data = jdt
+		}
+	case ical.CompToDo:
+		if tdt, e := parseTodo(comp); e != nil {
+			return
+		} else {
+			data = tdt
+		}
+	case ical.CompFreeBusy:
+		// not implemented
+		err = &webDAVerror{
+			Code:      http.StatusForbidden,
+			Condition: &supportedCalendarComponentName,
+		}
+		return
+	default:
+		return
+	}
+	err = nil
+	return
+}
+
+func ParseCalendarObjectResource(cal *ical.Calendar) (metadata *CalendarMetaData, err error) {
 	var component_type string
 	err = &webDAVerror{
 		Code:      http.StatusForbidden,
@@ -277,8 +503,7 @@ func ParseCalendarObjectResource(cal *ical.Calendar) (metadata *calendarMetaData
 		return
 	}
 
-	events := make([]eventData, 0, len(cal.Children))
-	journals := make([]journalData, 0, len(cal.Children))
+	comps := make([]compData, 0, len(cal.Children))
 	for _, child := range cal.Children {
 		if child.Name == ical.CompTimezone {
 			continue
@@ -287,32 +512,15 @@ func ParseCalendarObjectResource(cal *ical.Calendar) (metadata *calendarMetaData
 		} else if child.Name != component_type {
 			return
 		}
-		switch child.Name {
-		case ical.CompEvent:
-			if edt, e := parseEvent(child); e != nil {
-				return
-			} else {
-				events = append(events, *edt)
-			}
-		case ical.CompJournal:
-			if jdt, e := parseJournal(child); e != nil {
-				return
-			} else {
-				journals = append(journals, *jdt)
-			}
-		case ical.CompToDo, ical.CompFreeBusy:
-			// not implemented
-			err = &webDAVerror{
-				Code:      http.StatusForbidden,
-				Condition: &supportedCalendarComponentName,
-			}
+		if comp, e := parseCalendarComponent(child); e != nil {
+			err = e
 			return
-		default:
-			return
+		} else {
+			comps = append(comps, *comp)
 		}
 	}
 
-	metadata = &calendarMetaData{component_type, events, journals}
+	metadata = &CalendarMetaData{component_type, comps}
 	err = nil
 	return
 }
