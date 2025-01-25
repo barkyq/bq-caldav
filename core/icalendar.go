@@ -13,7 +13,7 @@ import (
 	"github.com/teambition/rrule-go"
 )
 
-type eventTimeData struct {
+type eventData struct {
 	uid          string
 	sequence     int64
 	dtstart      time.Time
@@ -23,8 +23,18 @@ type eventTimeData struct {
 	event        *ical.Component
 }
 
-type calendarTimeData struct {
-	events []eventTimeData
+type journalData struct {
+	uid          string
+	dtstart      time.Time
+	summary      string
+	descriptions []string
+	journal      *ical.Component
+}
+
+type calendarMetaData struct {
+	ComponentType string
+	events        []eventData
+	journal       []journalData
 }
 
 const dateFormat = "20060102"
@@ -41,7 +51,7 @@ var symbolmap = map[string]int64{
 	"S": 60,
 }
 
-func (edt *eventTimeData) Intersect(min time.Time, max time.Time) (ok bool) {
+func (edt *eventData) Intersect(min time.Time, max time.Time) (ok bool) {
 
 	// try first event
 	if max.IsZero() && edt.dtstart.Add(edt.duration).After(min) || edt.dtstart.Equal(min) && edt.duration == 0 {
@@ -97,8 +107,47 @@ func parseDuration(val string) (dur time.Duration, err error) {
 	return time.Duration(seconds) * time.Second, nil
 }
 
-func parseEvent(comp *ical.Component) (timedata *eventTimeData, err error) {
-	timedata = &eventTimeData{}
+func parseJournal(comp *ical.Component) (jdt *journalData, err error) {
+	jdt = &journalData{}
+
+	// get UID
+	if val := comp.Props.Get(ical.PropUID); val != nil {
+		jdt.uid = val.Value
+	} else {
+		err = fmt.Errorf("parse error")
+		return
+	}
+
+	// get DTSTART; not required
+	// if there is no dtstart, it should not match any filter
+	// so we can leave it unset
+	if val := comp.Props.Get(ical.PropDateTimeStart); val != nil {
+		if t, e := val.DateTime(nil); e != nil {
+			err = e
+			return
+		} else {
+			jdt.dtstart = t
+		}
+	}
+
+	repl := strings.NewReplacer("\\n", "\n", "\\,", ",", "\\;", ";", "\\\\", "\\")
+	// get summary
+	if p := comp.Props.Get(ical.PropSummary); p != nil {
+		jdt.summary = repl.Replace(p.Value)
+	}
+
+	// get descriptions
+	descriptions := comp.Props.Values(ical.PropDescription)
+	jdt.descriptions = make([]string, len(descriptions))
+	for k, v := range descriptions {
+		jdt.descriptions[k] = repl.Replace(v.Value)
+	}
+	jdt.journal = comp
+	return
+}
+
+func parseEvent(comp *ical.Component) (timedata *eventData, err error) {
+	timedata = &eventData{}
 	err = fmt.Errorf("parse error")
 
 	// get uid
@@ -217,7 +266,7 @@ func parseEvent(comp *ical.Component) (timedata *eventTimeData, err error) {
 	return
 }
 
-func ParseCalendarObjectResource(cal *ical.Calendar) (timedata *calendarTimeData, err error) {
+func ParseCalendarObjectResource(cal *ical.Calendar) (metadata *calendarMetaData, err error) {
 	var component_type string
 	err = &webDAVerror{
 		Code:      http.StatusForbidden,
@@ -228,7 +277,8 @@ func ParseCalendarObjectResource(cal *ical.Calendar) (timedata *calendarTimeData
 		return
 	}
 
-	events := make([]eventTimeData, 0, len(cal.Children))
+	events := make([]eventData, 0, len(cal.Children))
+	journals := make([]journalData, 0, len(cal.Children))
 	for _, child := range cal.Children {
 		if child.Name == ical.CompTimezone {
 			continue
@@ -239,12 +289,18 @@ func ParseCalendarObjectResource(cal *ical.Calendar) (timedata *calendarTimeData
 		}
 		switch child.Name {
 		case ical.CompEvent:
-			if etd, e := parseEvent(child); e != nil {
+			if edt, e := parseEvent(child); e != nil {
 				return
 			} else {
-				events = append(events, *etd)
+				events = append(events, *edt)
 			}
-		case ical.CompToDo, ical.CompJournal, ical.CompFreeBusy:
+		case ical.CompJournal:
+			if jdt, e := parseJournal(child); e != nil {
+				return
+			} else {
+				journals = append(journals, *jdt)
+			}
+		case ical.CompToDo, ical.CompFreeBusy:
 			// not implemented
 			err = &webDAVerror{
 				Code:      http.StatusForbidden,
@@ -256,7 +312,7 @@ func ParseCalendarObjectResource(cal *ical.Calendar) (timedata *calendarTimeData
 		}
 	}
 
-	timedata = &calendarTimeData{events}
+	metadata = &calendarMetaData{component_type, events, journals}
 	err = nil
 	return
 }

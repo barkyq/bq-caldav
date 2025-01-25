@@ -194,10 +194,12 @@ func (b *FSBackend) Put(r *http.Request) (err error) {
 		case core.AddressbookScope:
 			err = core.WebDAVerror(http.StatusForbidden, &xml.Name{Space: "urn:ietf:params:xml:ns:carddav", Local: "addressbook-collection-location-ok"})
 		}
-		if err != nil {
-			return
-		}
 	}
+
+	if err != nil {
+		return
+	}
+
 	if f, e := b.create(p); e != nil {
 		err = e
 	} else if _, e := io.Copy(f, body); e != nil {
@@ -212,6 +214,14 @@ func (b *FSBackend) checkCalendarObject(r *http.Request, p string, cal *ical.Cal
 	// if `if-match` or `if-none-match` fails return 412 precondition failed
 	// https://datatracker.ietf.org/doc/html/rfc7232
 	//
+
+	collection_prop := &core.Prop{}
+	if pf, e := b.fsys.Open(path.Join(path.Dir(p), "props.xml")); e != nil {
+		return nil, core.WebDAVerror(http.StatusForbidden, &xml.Name{Space: "urn:ietf:params:xml:ns:caldav", Local: "calendar-collection-location-ok"})
+	} else if e := xml.NewDecoder(pf).Decode(collection_prop); e != nil {
+		return nil, e
+	}
+
 	etag, _, _, _, _ := b.getETagMTCLBody(p)
 	// don't bother checking the error; etag == "" if the file does not exist
 
@@ -224,10 +234,12 @@ func (b *FSBackend) checkCalendarObject(r *http.Request, p string, cal *ical.Cal
 	//
 	buf := bytes.NewBuffer(nil)
 
-	if _, e := core.ParseCalendarObjectResource(cal); e != nil {
+	if td, e := core.ParseCalendarObjectResource(cal); e != nil {
 		return nil, e
 	} else if e := ical.NewEncoder(buf).Encode(cal); e != nil {
 		return nil, core.WebDAVerror(http.StatusInternalServerError, nil)
+	} else if e := core.CheckCalendarCompIsSupported(collection_prop, td.ComponentType); e != nil {
+		return nil, e
 	}
 	// do not bother checking
 	// uid-conflict

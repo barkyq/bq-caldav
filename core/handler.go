@@ -222,6 +222,10 @@ func (h *Handler) handleReport(w http.ResponseWriter, r *http.Request) (err erro
 		err = e
 	} else if isXML {
 		err = xml.NewDecoder(r.Body).Decode(report)
+	} else if !isXML {
+		err = &webDAVerror{
+			Code: http.StatusUnsupportedMediaType,
+		}
 	}
 	if err != nil {
 		return err

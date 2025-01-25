@@ -23,8 +23,8 @@ var (
 	statusFailedDependency                               = statusHelper(http.StatusFailedDependency)
 	statusForbidden                                      = statusHelper(http.StatusForbidden)
 	principalURL, currentUserPrincipal, principalAddress = newPrincipalURL("/")
-	defaultSupportedCalendarComponentSet                 = supportedCalendarComponentSetHelper("VEVENT")
 	defaultSupportedAddressData                          = supportedAddressDataHelper("3.0", "4.0")
+	defaultSupportedCalendarComponentSet                 = supportedCalendarComponentSetHelper("VEVENT", "VJOURNAL")
 	defaultCalendarHomeSet                               = newCalendarHomeSet("/calendars/")
 	defaultAddressbookHomeSet                            = newAddressbookHomeSet("/addressbook/")
 	collectionResourceType                               = newResourceType(collectionTypeName)
@@ -322,10 +322,9 @@ func DefaultPropsHomeSet() []Any {
 func MarshalPropsCalendarCollection(custom *Prop) (props_Found []Any) {
 	props_Found = []Any{
 		calendarResourceType,
-		defaultSupportedCalendarComponentSet,
 	}
 	for _, q := range custom.Props {
-		if q.XMLName == resourceTypeName || q.XMLName == supportedCalendarComponentSetName {
+		if q.XMLName == resourceTypeName {
 			continue
 		}
 		props_Found = append(props_Found, q)
@@ -388,11 +387,11 @@ func matchCompFilterWithComp(cf compFilter, comp *ical.Component) (match bool, e
 				end_time = t
 			}
 		}
-		if timedata, e := parseEvent(comp); e != nil {
+		if metadata, e := parseEvent(comp); e != nil {
 			return false, &webDAVerror{
 				Code: http.StatusInternalServerError,
 			}
-		} else if timedata.Intersect(start_time, end_time) {
+		} else if metadata.Intersect(start_time, end_time) {
 			return true, nil
 		} else {
 			return false, nil
@@ -639,6 +638,7 @@ func PropPatchHelper(current_prop *Prop, property_update *PropertyUpdate) (ms *M
 outer1:
 	for _, val := range current_prop.Props {
 		for _, remove := range remove_props {
+			// todo: do not allow removal of protected props
 			if val.XMLName == remove.XMLName {
 				status_OK = append(status_OK, Any{XMLName: remove.XMLName})
 				continue outer1
@@ -662,6 +662,7 @@ outer3:
 	for _, set := range set_props {
 		status_OK = append(status_OK, Any{XMLName: set.XMLName})
 		for k, val := range new_props {
+			// todo: do not allow setting of protected props
 			if val.XMLName == set.XMLName {
 				new_props[k] = set
 				continue outer3
@@ -742,6 +743,44 @@ func CheckCalendarDataSupportedAndValid(content_type_header string, request_body
 		cal = c
 	}
 	return
+}
+
+func CheckCalendarCompIsSupported(p *Prop, comp_type string) (err error) {
+	err = &webDAVerror{
+		Code: http.StatusInternalServerError,
+	}
+	var sccs Any
+	for _, a := range p.Props {
+		if a.XMLName == supportedCalendarComponentSetName {
+			sccs = a
+			goto jump
+		}
+	}
+	return nil
+jump:
+	d := xml.NewDecoder(bytes.NewBuffer(sccs.Content))
+	for {
+		if tok, e := d.Token(); e != nil {
+			if errors.Is(e, io.EOF) {
+				break
+			} else {
+				return
+			}
+		} else if t, ok := tok.(xml.StartElement); ok {
+			for _, attr := range t.Attr {
+				if name, val := attr.Name.Local, attr.Value; name != "name" {
+					continue
+				} else if val == comp_type {
+					err = nil
+					return
+				}
+			}
+		}
+	}
+	return &webDAVerror{
+		Code:      http.StatusForbidden,
+		Condition: &supportedCalendarComponentName,
+	}
 }
 
 func CheckAddressDataSupportedAndValid(content_type_header string, request_body io.Reader) (card vcard.Card, err error) {
@@ -830,7 +869,7 @@ func CheckMkColReq(scope Scope, prop_req []Prop) (resp []PropStat, prop_write Pr
 						for _, attr := range t.Attr {
 							if name, val := attr.Name.Local, attr.Value; name != "name" {
 								continue
-							} else if val != ical.CompEvent {
+							} else if val != ical.CompEvent && val != ical.CompJournal {
 								check = false
 								break
 							}
@@ -845,9 +884,10 @@ func CheckMkColReq(scope Scope, prop_req []Prop) (resp []PropStat, prop_write Pr
 							}},
 						},
 						Status:              statusForbidden,
-						ResponseDescription: "only VEVENT collections are supported",
+						ResponseDescription: "only VEVENT and VJOURNAL collections are supported",
 					})
 				} else {
+					write_props = append(write_props, a)
 					new_props = append(new_props, Any{XMLName: a.XMLName})
 				}
 			case supportedAddressDataName:
@@ -915,7 +955,18 @@ func CheckMkColReq(scope Scope, prop_req []Prop) (resp []PropStat, prop_write Pr
 			},
 			Status: statusFailedDependency,
 		})
+		return
 	}
+	// todo: remove this once all components are supported
+	if scope == CalendarScope {
+		for _, w := range write_props {
+			if w.XMLName == supportedCalendarComponentSetName {
+				goto jump
+			}
+		}
+		write_props = append(write_props, defaultSupportedCalendarComponentSet)
+	}
+jump:
 	prop_write = Prop{
 		Props: write_props,
 	}
