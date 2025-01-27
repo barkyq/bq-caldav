@@ -186,9 +186,9 @@ func isContentXML(h http.Header) (bool, error) {
 	}
 }
 
-func wrapError(condition xml.Name) *davError {
+func wrapError(condition xml.Name, content []byte) *davError {
 	return &davError{
-		Conditions: []Any{{XMLName: condition}},
+		Conditions: []Any{{XMLName: condition, Content: content}},
 	}
 }
 
@@ -358,9 +358,22 @@ func MatchCalendarWithQuery(cal *ical.Calendar, query *Query) (bool, error) {
 }
 
 func matchCompFilterWithComp(cf compFilter, comp *ical.Component) (match bool, err error) {
+	if b, e := xml.Marshal(&cf); e != nil {
+		return false, &webDAVerror{Code: http.StatusBadRequest}
+	} else {
+		err = &webDAVerror{
+			Code:      http.StatusNotImplemented,
+			Condition: &supportedFilterName,
+			Content:   b,
+		}
+	}
+
 	switch {
 	case cf.TimeRange != nil:
 		var start_time, end_time time.Time
+		if comp.Name != ical.CompEvent && comp.Name != ical.CompToDo && comp.Name != ical.CompJournal {
+			return false, err
+		}
 		if cf.TimeRange.Start != "" {
 			if t, e := time.Parse(dateWithUTCTimeFormat, cf.TimeRange.Start); e != nil {
 				return false, &webDAVerror{
@@ -380,9 +393,7 @@ func matchCompFilterWithComp(cf compFilter, comp *ical.Component) (match bool, e
 			}
 		}
 		if data, e := parseCalendarComponent(comp); e != nil {
-			return false, &webDAVerror{
-				Code: http.StatusInternalServerError,
-			}
+			return false, e
 		} else if data.Intersect(start_time, end_time) {
 			return true, nil
 		} else {
@@ -390,9 +401,7 @@ func matchCompFilterWithComp(cf compFilter, comp *ical.Component) (match bool, e
 		}
 	case cf.PropFilters != nil:
 		// prop filter not implemented
-		return false, &webDAVerror{
-			Code: http.StatusNotImplemented,
-		}
+		return false, err
 	case cf.CompFilters != nil:
 		return matchCompFiltersWithCompChildren(cf.CompFilters, comp.Children)
 	default:
@@ -473,6 +482,90 @@ func IfMatchifNoneMatch(etag string, ifmatch string, ifnonematch string) (err er
 	return
 }
 
+func partialRetrieval(source *ical.Component, compReq *compReq, cdReq *calendarDataReq) (partial *ical.Component, err error) {
+	if source.Name != compReq.Name {
+		return
+	}
+	partial = ical.NewComponent(source.Name)
+	var required []string
+
+	source.Props.SetText(ical.PropProductID, "-//bq-caldav//partial-retrieval//EN")
+	// TODO:
+	// cdReq.Expand
+	// cdReq.LimitRecurrenceSet
+	// cdReq.LimitFreeBusySet
+
+	// need to do this, even though CalDAV RFC allows absence of required properties
+	// because go-ical will not encode if required properties are missing.
+	switch source.Name {
+	case ical.CompCalendar:
+		required = []string{ical.PropVersion, ical.PropProductID}
+	case ical.CompEvent:
+		required = []string{ical.PropUID, ical.PropDateTimeStamp, ical.PropDateTimeStart}
+	case ical.CompToDo, ical.CompJournal, ical.CompFreeBusy:
+		required = []string{ical.PropUID, ical.PropDateTimeStamp}
+	case ical.CompTimezone:
+		required = []string{ical.PropTimezoneID}
+	case ical.CompAlarm:
+		required = []string{ical.PropAction, ical.PropTrigger, ical.PropDescription, ical.PropSummary}
+	}
+	for _, requiredp := range required {
+		if p := source.Props.Get(requiredp); p != nil {
+			if t, e := p.DateTime(nil); e != nil {
+				partial.Props.Add(p)
+			} else {
+				partial.Props.SetDateTime(requiredp, t.In(time.UTC))
+			}
+		}
+	}
+
+	for _, p := range compReq.Props {
+		var name string
+		var novalue bool
+		for _, a := range p.Attr {
+			if a.Name.Local == "name" {
+				name = a.Value
+			} else if a.Name.Local == "novalue" {
+				if a.Value == "yes" {
+					novalue = true
+				}
+			}
+		}
+		if name == "" {
+			return nil, &webDAVerror{
+				Code: http.StatusBadRequest,
+			}
+		}
+		for _, r := range required {
+			if name == r {
+				// already added required properties
+				continue
+			}
+		}
+		for _, a := range source.Props.Values(name) {
+			if novalue {
+				partial.Props.Add(&ical.Prop{Name: name})
+			} else if t, e := a.DateTime(nil); e != nil {
+				partial.Props.Add(&a)
+			} else {
+				partial.Props.SetDateTime(name, t.In(time.UTC))
+			}
+		}
+	}
+	for _, c := range compReq.Comps {
+		for _, source_child := range source.Children {
+			if source_child.Name == c.Name {
+				if child, e := partialRetrieval(source_child, &c, cdReq); e != nil {
+					return nil, e
+				} else {
+					partial.Children = append(partial.Children, child)
+				}
+			}
+		}
+	}
+	return partial, nil
+}
+
 func CalendarData(cal *ical.Calendar, prop *Prop) (*Any, error) {
 	if prop == nil {
 		return nil, nil
@@ -488,41 +581,26 @@ func CalendarData(cal *ical.Calendar, prop *Prop) (*Any, error) {
 		return nil, nil
 	}
 	if cdata.Content != nil {
-		return nil, &webDAVerror{
-			Code: http.StatusNotImplemented,
+		buf := bytes.NewBufferString("<calendar-data xmlns=\"urn:ietf:params:xml:ns:caldav\">")
+		buf.Write(cdata.Content)
+		buf.WriteString("</calendar-data>")
+		cd := &calendarDataReq{}
+		if e := xml.NewDecoder(buf).Decode(cd); e != nil {
+			fmt.Println(e.Error())
+			return nil, &webDAVerror{
+				Code: http.StatusInternalServerError,
+			}
+		} else if c, e := partialRetrieval(cal.Component, cd.CompReq, cd); e != nil {
+			return nil, e
+		} else {
+			cal = &ical.Calendar{Component: c}
 		}
-		// 9.6.  CALDAV:calendar-data XML Element . . . . . . . . . . . . . 79
-		// 9.6.1.  CALDAV:comp XML Element  . . . . . . . . . . . . . . . 80
-		// 9.6.2.  CALDAV:allcomp XML Element . . . . . . . . . . . . . . 81
-		// 9.6.3.  CALDAV:allprop XML Element . . . . . . . . . . . . . . 81
-		// 9.6.4.  CALDAV:prop XML Element  . . . . . . . . . . . . . . . 82
-		// 9.6.5.  CALDAV:expand XML Element  . . . . . . . . . . . . . . 82
-		// 9.6.6.  CALDAV:limit-recurrence-set XML Element  . . . . . . . 83
-		// 9.6.7.  CALDAV:limit-freebusy-set XML Element  . . . . . . . . 84
-		// todo: need to handle something like this
-		// <C:calendar-data>
-		//   <C:comp name="VCALENDAR">
-		//     <C:prop name="VERSION"/>
-		//     <C:comp name="VEVENT">
-		//       <C:prop name="SUMMARY"/>
-		//       <C:prop name="UID"/>
-		//       <C:prop name="DTSTART"/>
-		//       <C:prop name="DTEND"/>
-		//       <C:prop name="DURATION"/>
-		//       <C:prop name="RRULE"/>
-		//       <C:prop name="RDATE"/>
-		//       <C:prop name="EXRULE"/>
-		//       <C:prop name="EXDATE"/>
-		//       <C:prop name="RECURRENCE-ID"/>
-		//     </C:comp>
-		//     <C:comp name="VTIMEZONE"/>
-		//   </C:comp>
-		// </C:calendar-data>
 	}
 
 	raw, escaped := bytes.NewBuffer(nil), bytes.NewBuffer(nil)
 	if e := ical.NewEncoder(raw).Encode(cal); e != nil {
 		// this will be bubbled up to internal server error
+		fmt.Println(e.Error())
 		return nil, e
 	} else if e := xml.EscapeText(escaped, raw.Bytes()); e != nil {
 		// this will be bubbled up to internal server error
@@ -981,7 +1059,7 @@ func CheckMkColReq(scope Scope, prop_req []Prop) (resp []PropStat, prop_write Pr
 							}},
 						},
 						Status: statusForbidden,
-						Error:  wrapError(validResourceTypeName),
+						Error:  wrapError(validResourceTypeName, nil),
 					})
 				} else {
 					new_props = append(new_props, Any{XMLName: a.XMLName})

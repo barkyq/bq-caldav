@@ -13,10 +13,10 @@ import (
 // propname OR allprop, include? OR prop
 type PropFind struct {
 	XMLName  xml.Name  `xml:"DAV: propfind"`
-	PropName *struct{} `xml:"propname,omitempty"`
-	AllProp  *struct{} `xml:"allprop,omitempty"`
-	Include  *Include  `xml:"include,omitempty"`
-	Prop     *Prop     `xml:"prop,omitempty"`
+	PropName *struct{} `xml:"propname"`
+	AllProp  *struct{} `xml:"allprop"`
+	Include  *Include  `xml:"include"`
+	Prop     *Prop     `xml:"prop"`
 }
 
 // https://datatracker.ietf.org/doc/html/rfc4918#section-14.8
@@ -164,6 +164,7 @@ var (
 	validCalendarObjectResourceName = xml.Name{Space: "urn:ietf:params:xml:ns:caldav", Local: "valid-calendar-object-resource"}
 	supportedCalendarComponentName  = xml.Name{Space: "urn:ietf:params:xml:ns:caldav", Local: "supported-calendar-component"}
 	calendarNoUIDConflictName       = xml.Name{Space: "urn:ietf:params:xml:ns:caldav", Local: "no-uid-conflict"}
+	supportedFilterName             = xml.Name{Space: "urn:ietf:params:xml:ns:caldav", Local: "supported-filter"}
 
 	addressbookNoUIDConflictName = xml.Name{Space: "urn:ietf:params:xml:ns:carddav", Local: "no-uid-conflict"}
 	validAddressDataName         = xml.Name{Space: "urn:ietf:params:xml:ns:carddav", Local: "valid-address-data"}
@@ -191,17 +192,35 @@ type calendarHomeSet struct {
 	Href    Href     `xml:"href"`
 }
 
+// calendar data elements
+type calendarDataReq struct {
+	XMLName            xml.Name `xml:"urn:ietf:params:xml:ns:caldav calendar-data"`
+	Expand             *Any     `xml:"urn:ietf:params:xml:ns:caldav expand"`
+	LimitRecurrenceSet *Any     `xml:"urn:ietf:params:xml:ns:caldav limit-recurrence-set"`
+	LimitFreeBusySet   *Any     `xml:"urn:ietf:params:xml:ns:caldav limit-freebusy-set"`
+	CompReq            *compReq `xml:"urn:ietf:params:xml:ns:caldav comp"`
+}
+
+type compReq struct {
+	XMLName xml.Name  `xml:"urn:ietf:params:xml:ns:caldav comp"`
+	Name    string    `xml:"name,attr"`
+	Allprop *struct{} `xml:"urn:ietf:params:xml:ns:caldav allprop"`
+	Allcomp *struct{} `xml:"urn:ietf:params:xml:ns:caldav allcomp"`
+	Props   []Any     `xml:"urn:ietf:params:xml:ns:caldav prop"`
+	Comps   []compReq `xml:"urn:ietf:params:xml:ns:caldav comp"`
+}
+
 // Calendar Report Elements
 //
 
 // https://datatracker.ietf.org/doc/html/rfc4791#section-9.5
 type Query struct {
 	XMLName           xml.Name           `xml:""`
-	AllProp           *struct{}          `xml:"DAV: allprop,omitempty"`
-	PropName          *struct{}          `xml:"DAV: propname,omitempty"`
-	Prop              *Prop              `xml:"DAV: prop,omitempty"`
-	CalendarFilter    *calendarfilter    `xml:"urn:ietf:params:xml:ns:caldav filter,omitempty"`
-	AddressbookFilter *addressbookfilter `xml:"urn:ietf:params:xml:ns:carddav filter,omitempty"`
+	AllProp           *struct{}          `xml:"DAV: allprop"`
+	PropName          *struct{}          `xml:"DAV: propname"`
+	Prop              *Prop              `xml:"DAV: prop"`
+	CalendarFilter    *calendarfilter    `xml:"urn:ietf:params:xml:ns:caldav filter"`
+	AddressbookFilter *addressbookfilter `xml:"urn:ietf:params:xml:ns:carddav filter"`
 	// TODO: timezone
 }
 
@@ -221,60 +240,60 @@ type addressbookfilter struct {
 type compFilter struct {
 	XMLName      xml.Name             `xml:"urn:ietf:params:xml:ns:caldav comp-filter"`
 	Name         string               `xml:"name,attr"`
-	IsNotDefined *struct{}            `xml:"is-not-defined,omitempty"`
-	TimeRange    *timeRange           `xml:"time-range,omitempty"`
-	PropFilters  []calendarPropFilter `xml:"prop-filter,omitempty"`
-	CompFilters  []compFilter         `xml:"comp-filter,omitempty"`
+	IsNotDefined *struct{}            `xml:"is-not-defined"`
+	TimeRange    *timeRange           `xml:"time-range"`
+	PropFilters  []calendarPropFilter `xml:"prop-filter"`
+	CompFilters  []compFilter         `xml:"comp-filter"`
 }
 
 // https://tools.ietf.org/html/rfc4791#section-9.7.2
 type calendarPropFilter struct {
 	XMLName      xml.Name      `xml:"urn:ietf:params:xml:ns:caldav prop-filter"`
 	Name         string        `xml:"name,attr"`
-	IsNotDefined *struct{}     `xml:"is-not-defined,omitempty"`
-	TimeRange    *timeRange    `xml:"time-range,omitempty"`
-	TextMatch    *textMatch    `xml:"text-match,omitempty"`
-	ParamFilter  []paramFilter `xml:"param-filter,omitempty"`
+	IsNotDefined *struct{}     `xml:"is-not-defined"`
+	TimeRange    *timeRange    `xml:"time-range"`
+	TextMatch    *textMatch    `xml:"text-match"`
+	ParamFilter  []paramFilter `xml:"param-filter"`
 }
 
 // https://tools.ietf.org/html/rfc4791#section-9.7.2
 type addressbookPropFilter struct {
 	XMLName      xml.Name      `xml:"urn:ietf:params:xml:ns:carddav prop-filter"`
 	Name         string        `xml:"name,attr"`
-	IsNotDefined *struct{}     `xml:"is-not-defined,omitempty"`
-	TextMatch    *textMatch    `xml:"text-match,omitempty"`
-	ParamFilter  []paramFilter `xml:"param-filter,omitempty"`
+	IsNotDefined *struct{}     `xml:"is-not-defined"`
+	TextMatch    *textMatch    `xml:"text-match"`
+	ParamFilter  []paramFilter `xml:"param-filter"`
 }
 
 // https://tools.ietf.org/html/rfc4791#section-9.7.3
 type paramFilter struct {
 	XMLName      xml.Name   `xml:""`
 	Name         string     `xml:"name,attr"`
-	IsNotDefined *struct{}  `xml:"is-not-defined,omitempty"`
-	TextMatch    *textMatch `xml:"text-match,omitempty"`
+	IsNotDefined *struct{}  `xml:"is-not-defined"`
+	TextMatch    *textMatch `xml:"text-match"`
 }
 
 // https://datatracker.ietf.org/doc/html/rfc4791#section-9.7.5
 type textMatch struct {
 	XMLName         xml.Name `xml:""`
 	Text            string   `xml:",chardata"`
-	Collation       string   `xml:"collation,attr,omitempty"`
-	NegateCondition string   `xml:"negate-condition,attr,omitempty"`
+	Collation       string   `xml:"collation,attr"`
+	NegateCondition string   `xml:"negate-condition,attr"`
 }
 
 // https://datatracker.ietf.org/doc/html/rfc4791#section-9.9
 type timeRange struct {
 	XMLName xml.Name `xml:"urn:ietf:params:xml:ns:caldav time-range"`
-	Start   string   `xml:"start,attr,omitempty"`
-	End     string   `xml:"end,attr,omitempty"`
+	Start   string   `xml:"start,attr"`
+	End     string   `xml:"end,attr"`
 }
 
 // https://datatracker.ietf.org/doc/html/rfc4791#section-9.5
 type Multiget struct {
 	XMLName  xml.Name  `xml:""`
-	AllProp  *struct{} `xml:"DAV: allprop,omitempty"`
-	PropName *struct{} `xml:"DAV: propname,omitempty"`
-	Prop     *Prop     `xml:"DAV: prop,omitempty"`
+	AllProp  *struct{} `xml:"DAV: allprop"`
+	PropName *struct{} `xml:"DAV: propname"`
+	Prop     *Prop     `xml:"DAV: prop"`
 	Hrefs    []Href    `xml:"DAV: href"`
 	// TODO: timezone
 }
@@ -294,7 +313,7 @@ func (r *reportReq) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
 		r.Multiget = &Multiget{}
 		v = r.Multiget
 	default:
-		return &webDAVerror{http.StatusBadRequest, nil}
+		return &webDAVerror{http.StatusBadRequest, nil, nil}
 	}
 
 	return d.DecodeElement(v, &start)

@@ -312,7 +312,7 @@ mux:
 		code = e.Code
 		if e.Condition == nil {
 			// no condition given
-		} else if b, e := xml.Marshal(wrapError(*e.Condition)); e != nil {
+		} else if b, e := xml.Marshal(wrapError(*e.Condition, e.Content)); e != nil {
 			panic(e)
 		} else {
 			w.Header().Add("Content-Type", "text/xml; charset=utf-8")

@@ -581,7 +581,7 @@ func (b *FSBackend) Query(r *http.Request, query *core.Query, depth byte) (ms *c
 			return nil
 		} else if resp, match, e := b.queryFile(q, fi, query); e != nil || !match {
 			if !errors.Is(e, &notFound{}) {
-				err = e
+				return e
 			}
 			return nil
 		} else {

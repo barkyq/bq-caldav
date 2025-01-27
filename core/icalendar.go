@@ -514,7 +514,7 @@ func parseCalendarComponent(comp *ical.Component) (data *compData, err error) {
 		} else {
 			data = tdt
 		}
-	case ical.CompFreeBusy:
+	case ical.CompAlarm, ical.CompFreeBusy:
 		// not implemented
 		err = &webDAVerror{
 			Code:      http.StatusForbidden,

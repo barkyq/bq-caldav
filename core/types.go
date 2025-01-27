@@ -22,6 +22,7 @@ type UidConflict struct {
 type webDAVerror struct {
 	Code      int
 	Condition *xml.Name
+	Content   []byte
 }
 
 func WebDAVerror(code int, name *xml.Name) error {
