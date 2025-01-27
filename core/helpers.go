@@ -842,16 +842,76 @@ func CheckAddressDataSupportedAndValid(content_type_header string, request_body 
 	return
 }
 
-func CheckMaxResourceSize(collection_prop *Prop, size int) error {
+func CheckMaxResourceSize(collection_prop *Prop, size uint64) error {
 	// will panic if collection_prop is nil
 	for _, a := range collection_prop.Props {
 		if a.XMLName.Local == "max-resource-size" {
-			if l, e := strconv.ParseInt(fmt.Sprintf("%s", a.Content), 10, 64); e != nil {
+			if l, e := strconv.ParseUint(fmt.Sprintf("%s", a.Content), 10, 64); e != nil {
 				return e
-			} else if l < int64(size) {
+			} else if l < size {
 				return &webDAVerror{
 					Code:      http.StatusForbidden,
 					Condition: &a.XMLName,
+				}
+			}
+		}
+	}
+	return nil
+}
+
+func CheckOtherCalendarPreconditions(collection_prop *Prop, md *CalendarMetaData) error {
+	for _, a := range collection_prop.Props {
+		switch a.XMLName {
+		case maxAttendeesPerInstanceName:
+			if l, e := strconv.ParseUint(fmt.Sprintf("%s", a.Content), 10, 64); e != nil {
+				return e
+			} else {
+				for _, c := range md.comps {
+					if uint64(len(c.comp.Props.Values(ical.PropAttendee))) > l {
+						return &webDAVerror{
+							Code:      http.StatusForbidden,
+							Condition: &a.XMLName,
+						}
+					}
+				}
+			}
+		case maxInstancesName:
+			if l, e := strconv.ParseUint(fmt.Sprintf("%s", a.Content), 10, 64); e != nil {
+				return e
+			} else {
+				for _, c := range md.comps {
+					if !rrule_count_instances(c.rset, l) {
+						return &webDAVerror{
+							Code:      http.StatusForbidden,
+							Condition: &a.XMLName,
+						}
+					}
+				}
+			}
+		case maxDateTimeName:
+			if t, e := time.ParseInLocation(dateWithUTCTimeFormat, fmt.Sprintf("%s", a.Content), time.UTC); e != nil {
+				return e
+			} else {
+				for _, c := range md.comps {
+					if c.Intersect(t, time.Time{}) {
+						return &webDAVerror{
+							Code:      http.StatusForbidden,
+							Condition: &a.XMLName,
+						}
+					}
+				}
+			}
+		case minDateTimeName:
+			if t, e := time.ParseInLocation(dateWithUTCTimeFormat, fmt.Sprintf("%s", a.Content), time.UTC); e != nil {
+				return e
+			} else {
+				for _, c := range md.comps {
+					if c.Intersect(time.Time{}, t) {
+						return &webDAVerror{
+							Code:      http.StatusForbidden,
+							Condition: &a.XMLName,
+						}
+					}
 				}
 			}
 		}
@@ -866,8 +926,22 @@ func CheckMkColReq(scope Scope, prop_req []Prop) (resp []PropStat, prop_write Pr
 	for _, prop := range prop_req {
 		for _, a := range prop.Props {
 			switch a.XMLName {
-			case calendarMaxResourceSizeName, addressbookMaxResourceSizeName:
-				if _, e := strconv.ParseInt(fmt.Sprintf("%s", a.Content), 10, 64); e != nil {
+			case maxDateTimeName, minDateTimeName:
+				if _, e := time.ParseInLocation(dateWithUTCTimeFormat, fmt.Sprintf("%s", a.Content), time.UTC); e != nil {
+					bad_props = append(bad_props, PropStat{
+						Prop: Prop{
+							Props: []Any{{
+								XMLName: a.XMLName,
+							}},
+						},
+						Status: statusBadRequest,
+					})
+				} else {
+					new_props = append(new_props, Any{XMLName: a.XMLName})
+					write_props = append(write_props, a)
+				}
+			case calendarMaxResourceSizeName, addressbookMaxResourceSizeName, maxInstancesName, maxAttendeesPerInstanceName:
+				if l, e := strconv.ParseUint(fmt.Sprintf("%s", a.Content), 10, 64); e != nil || l == 0 {
 					bad_props = append(bad_props, PropStat{
 						Prop: Prop{
 							Props: []Any{{

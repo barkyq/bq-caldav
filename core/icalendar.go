@@ -20,6 +20,7 @@ type compData struct {
 	duration     time.Duration
 	rset         *rrule.Set
 	recurrenceid time.Time
+	attendees    uint64
 	summary      string
 	description  string
 	comp         *ical.Component
@@ -73,6 +74,25 @@ func intersect_helper(min time.Time, max time.Time, start time.Time, duration ti
 		return true
 	}
 	return false
+}
+
+func rrule_count_instances(rset *rrule.Set, max_number_of_instances uint64) bool {
+	if rset == nil {
+		return true
+	} else {
+		count := uint64(0)
+		next := rset.Iterator()
+		for {
+			if _, ok := next(); !ok {
+				return true
+			} else {
+				count++
+				if count > max_number_of_instances {
+					return false
+				}
+			}
+		}
+	}
 }
 
 func rrule_intersect_helper(min time.Time, max time.Time, rset *rrule.Set, duration time.Duration) bool {

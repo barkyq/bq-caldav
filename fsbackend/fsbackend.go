@@ -272,11 +272,11 @@ func (b *FSBackend) checkCalendarObject(r *http.Request, p string, cal *ical.Cal
 	//
 	buf := bytes.NewBuffer(nil)
 
-	if td, e := core.ParseCalendarObjectResource(cal); e != nil {
+	if md, e := core.ParseCalendarObjectResource(cal); e != nil {
 		return nil, e
-	} else if e := core.CheckCalendarCompIsSupported(collection_prop, td.ComponentType); e != nil {
+	} else if e := core.CheckCalendarCompIsSupported(collection_prop, md.ComponentType); e != nil {
 		return nil, e
-	} else if uid, e := td.GetUID(); e != nil {
+	} else if uid, e := md.GetUID(); e != nil {
 		return nil, e
 	} else if v, ok := b.uidmap[path.Dir(p)+":"+uid]; ok && v != r.URL.Path {
 		return nil, &core.UidConflict{Scope: core.CalendarScope, Href: core.Href{Target: v}}
@@ -284,16 +284,14 @@ func (b *FSBackend) checkCalendarObject(r *http.Request, p string, cal *ical.Cal
 		return nil, &core.UidConflict{Scope: core.CalendarScope, Href: core.Href{Target: r.URL.Path}}
 	} else if e := ical.NewEncoder(buf).Encode(cal); e != nil {
 		return nil, core.WebDAVerror(http.StatusInternalServerError, nil)
-	} else if e := core.CheckMaxResourceSize(collection_prop, buf.Len()); e != nil {
+	} else if e := core.CheckMaxResourceSize(collection_prop, uint64(buf.Len())); e != nil {
+		return nil, e
+	} else if e := core.CheckOtherCalendarPreconditions(collection_prop, md); e != nil {
 		return nil, e
 	} else {
 		b.uidmap[path.Dir(p)+":"+uid] = r.URL.Path
 	}
 
-	// do not check
-	// max-instances for recurring events
-	// max-date-time, min-date-time
-	// max-attendees-per-instance
 	return buf, nil
 }
 
@@ -327,7 +325,7 @@ func (b *FSBackend) checkAddressObject(r *http.Request, p string, card vcard.Car
 		return nil, &core.UidConflict{Scope: core.AddressbookScope, Href: core.Href{Target: r.URL.Path}}
 	} else if e := vcard.NewEncoder(buf).Encode(card); e != nil {
 		return nil, core.WebDAVerror(http.StatusInternalServerError, nil)
-	} else if e := core.CheckMaxResourceSize(collection_prop, buf.Len()); e != nil {
+	} else if e := core.CheckMaxResourceSize(collection_prop, uint64(buf.Len())); e != nil {
 		return nil, e
 	} else {
 		b.uidmap[path.Dir(p)+":"+uid] = r.URL.Path
