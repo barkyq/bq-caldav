@@ -14,6 +14,11 @@ const (
 	// You can add more scopes here if needed
 )
 
+type UidConflict struct {
+	Scope Scope
+	Href  Href
+}
+
 type webDAVerror struct {
 	Code      int
 	Condition *xml.Name
@@ -24,6 +29,10 @@ func WebDAVerror(code int, name *xml.Name) error {
 		Code:      code,
 		Condition: name,
 	}
+}
+
+func (err *UidConflict) Error() (s string) {
+	return
 }
 
 func (err *webDAVerror) Error() string {

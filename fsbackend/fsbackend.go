@@ -1,10 +1,12 @@
 package fsbackend
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/base32"
 	"encoding/xml"
 	"errors"
+	"fmt"
 	"hash/fnv"
 	"io"
 	"io/fs"
@@ -27,6 +29,7 @@ type FSBackend struct {
 	mkdir  func(p string) error
 	delete func(p string) error
 	fsys   fs.FS
+	uidmap map[string]string
 	lock   *sync.Mutex
 }
 
@@ -36,7 +39,32 @@ func NewBackend(location string) *FSBackend {
 	} else if e := os.MkdirAll(path.Join(location, "addressbook"), os.ModePerm); e != nil {
 		panic(e)
 	}
-
+	fsys := os.DirFS(location)
+	br := new(bufio.Reader)
+	uidmap := make(map[string]string)
+	if e := fs.WalkDir(fsys, ".", func(q string, de fs.DirEntry, err error) error {
+		if err != nil || de.IsDir() || path.Base(q) == "props.xml" {
+			return nil
+		} else if f, e := fsys.Open(q); e != nil {
+			return e
+		} else {
+			br.Reset(f)
+			for {
+				if l, e := br.ReadSlice('\n'); e == nil {
+					if !bytes.HasPrefix(l, []byte("UID:")) {
+						continue
+					} else if l = bytes.TrimSpace(l[4:]); true {
+						uidmap[fmt.Sprintf("%s:%s", path.Dir(q), l)] = "/" + q
+						return nil
+					}
+				} else {
+					return nil
+				}
+			}
+		}
+	}); e != nil {
+		panic(e)
+	}
 	return &FSBackend{
 		create: func(p string) (io.WriteCloser, error) {
 			return os.Create(path.Join(location, p))
@@ -47,8 +75,9 @@ func NewBackend(location string) *FSBackend {
 		delete: func(p string) error {
 			return os.RemoveAll(path.Join(location, p))
 		},
-		fsys: os.DirFS(location),
-		lock: new(sync.Mutex),
+		fsys:   os.DirFS(location),
+		uidmap: uidmap,
+		lock:   new(sync.Mutex),
 	}
 }
 
@@ -112,7 +141,6 @@ jump:
 }
 
 // DELETE
-// allow deletion of calendar collections
 func (b *FSBackend) Delete(r *http.Request) (err error) {
 	b.lock.Lock()
 	defer b.lock.Unlock()
@@ -122,12 +150,22 @@ func (b *FSBackend) Delete(r *http.Request) (err error) {
 		return core.WebDAVerror(http.StatusNotFound, nil)
 	} else if fi.IsDir() {
 		return b.delete(p)
-	} else if etag, _, _, _, e := b.getETagMTCLBody(p); e != nil {
+	} else if etag, _, _, current_body, e := b.getETagMTCLBody(p); e != nil {
 		return e
 	} else if e := core.IfMatchifNoneMatch(etag, r.Header.Get("If-Match"), r.Header.Get("If-None-Match")); e != nil {
 		return err
 	} else if e := b.delete(p); e != nil {
 		return e
+	} else {
+		// delete from uidmap if it is a UID object
+		if s := bytes.Index(current_body, []byte("UID:")); s == -1 {
+			// do nothing
+		} else if t := bytes.Index(current_body[s+4:], []byte{'\r', '\n'}); t == -1 {
+			// do nothing
+		} else {
+			// delete from uidmap
+			delete(b.uidmap, fmt.Sprintf("%s:%s", path.Dir(p), current_body[s+4:s+4+t]))
+		}
 	}
 	return nil
 }
@@ -222,7 +260,7 @@ func (b *FSBackend) checkCalendarObject(r *http.Request, p string, cal *ical.Cal
 		return nil, e
 	}
 
-	etag, _, _, _, _ := b.getETagMTCLBody(p)
+	etag, mt, _, current_body, _ := b.getETagMTCLBody(p)
 	// don't bother checking the error; etag == "" if the file does not exist
 
 	if e := core.IfMatchifNoneMatch(etag, r.Header.Get("If-Match"), r.Header.Get("If-None-Match")); e != nil {
@@ -236,17 +274,26 @@ func (b *FSBackend) checkCalendarObject(r *http.Request, p string, cal *ical.Cal
 
 	if td, e := core.ParseCalendarObjectResource(cal); e != nil {
 		return nil, e
-	} else if e := ical.NewEncoder(buf).Encode(cal); e != nil {
-		return nil, core.WebDAVerror(http.StatusInternalServerError, nil)
 	} else if e := core.CheckCalendarCompIsSupported(collection_prop, td.ComponentType); e != nil {
 		return nil, e
+	} else if uid, e := td.GetUID(); e != nil {
+		return nil, e
+	} else if v, ok := b.uidmap[path.Dir(p)+":"+uid]; ok && v != r.URL.Path {
+		return nil, &core.UidConflict{Scope: core.CalendarScope, Href: core.Href{Target: v}}
+	} else if d := bytes.Index(current_body, []byte(uid)); mt != nil && mt.Is(ical.MIMEType) && d == -1 {
+		return nil, &core.UidConflict{Scope: core.CalendarScope, Href: core.Href{Target: r.URL.Path}}
+	} else if e := ical.NewEncoder(buf).Encode(cal); e != nil {
+		return nil, core.WebDAVerror(http.StatusInternalServerError, nil)
+	} else if e := core.CheckMaxResourceSize(collection_prop, buf.Len()); e != nil {
+		return nil, e
+	} else {
+		b.uidmap[path.Dir(p)+":"+uid] = r.URL.Path
 	}
-	// do not bother checking
-	// uid-conflict
+
+	// do not check
 	// max-instances for recurring events
 	// max-date-time, min-date-time
 	// max-attendees-per-instance
-	// max-resource-size
 	return buf, nil
 }
 
@@ -254,21 +301,38 @@ func (b *FSBackend) checkAddressObject(r *http.Request, p string, card vcard.Car
 	// if `if-match` or `if-none-match` fails return 412 precondition failed
 	// https://datatracker.ietf.org/doc/html/rfc7232
 	//
-	etag, _, _, _, _ := b.getETagMTCLBody(p)
+	etag, mt, _, current_body, _ := b.getETagMTCLBody(p)
 	// don't bother checking the error; etag == "" if the file does not exist
 
 	if e := core.IfMatchifNoneMatch(etag, r.Header.Get("If-Match"), r.Header.Get("If-None-Match")); e != nil {
 		return nil, e
 	}
 
-	buf := bytes.NewBuffer(nil)
-
-	if e := vcard.NewEncoder(buf).Encode(card); e != nil {
-		return nil, core.WebDAVerror(http.StatusInternalServerError, nil)
+	collection_prop := &core.Prop{}
+	if pf, e := b.fsys.Open(path.Join(path.Dir(p), "props.xml")); e != nil {
+		return nil, core.WebDAVerror(http.StatusForbidden, &xml.Name{Space: "urn:ietf:params:xml:ns:carddav", Local: "addressbook-collection-location-ok"})
+	} else if e := xml.NewDecoder(pf).Decode(collection_prop); e != nil {
+		return nil, e
 	}
-	// do not bother checking
-	// uid-conflict
-	// max-resource-size
+
+	buf := bytes.NewBuffer(nil)
+	if f := card.Get(vcard.FieldUID); f == nil {
+		// should have already checked this earlier in the handling
+		panic("vcard is missing UID")
+	} else if uid := f.Value; false {
+		//
+	} else if v, ok := b.uidmap[path.Dir(p)+":"+uid]; ok && v != r.URL.Path {
+		return nil, &core.UidConflict{Scope: core.AddressbookScope, Href: core.Href{Target: v}}
+	} else if d := bytes.Index(current_body, []byte(uid)); mt != nil && mt.Is(ical.MIMEType) && d == -1 {
+		return nil, &core.UidConflict{Scope: core.AddressbookScope, Href: core.Href{Target: r.URL.Path}}
+	} else if e := vcard.NewEncoder(buf).Encode(card); e != nil {
+		return nil, core.WebDAVerror(http.StatusInternalServerError, nil)
+	} else if e := core.CheckMaxResourceSize(collection_prop, buf.Len()); e != nil {
+		return nil, e
+	} else {
+		b.uidmap[path.Dir(p)+":"+uid] = r.URL.Path
+	}
+
 	return buf, nil
 }
 
@@ -290,7 +354,11 @@ func (b *FSBackend) PropPatch(r *http.Request, property_update *core.PropertyUpd
 	}
 
 	// return ms, and record new_prop (reusing current_prop struct)
-	ms, current_prop = core.PropPatchHelper(current_prop, property_update)
+	ms, current_prop = core.PropPatchHelper(getScope(r.URL.Path), current_prop, property_update)
+
+	if current_prop == nil {
+		return
+	}
 
 	// write the new props.xml file
 	if f, e := b.create(p); e != nil {
@@ -460,7 +528,7 @@ func (b *FSBackend) propFindFile(p string, fi fs.FileInfo) (props_Found []core.A
 	return
 }
 
-// REPORT calendar-query
+// REPORT calendar-query or addressbook-query
 func (b *FSBackend) Query(r *http.Request, query *core.Query, depth byte) (ms *core.MultiStatus, err error) {
 	query_scope := query.Scope()
 	switch getScope(r.URL.Path) {
@@ -558,7 +626,7 @@ func (b *FSBackend) queryFile(p string, fi fs.FileInfo, query *core.Query) (resp
 			props_Found = append(props_Found, *a)
 		}
 	case core.AddressbookScope:
-		// todo filter via query
+		// todo: filter via query
 		if card, e := vcard.NewDecoder(file).Decode(); e != nil {
 			return
 		} else if a, e := core.AddressData(card, query.Prop); e != nil {

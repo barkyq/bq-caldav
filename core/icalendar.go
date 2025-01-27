@@ -44,6 +44,22 @@ var symbolmap = map[string]int64{
 	"S": 60,
 }
 
+func (md *CalendarMetaData) GetUID() (uid string, err error) {
+	err = &webDAVerror{
+		Code:      http.StatusForbidden,
+		Condition: &validCalendarObjectResourceName,
+	}
+	for _, c := range md.comps {
+		if uid == "" {
+			uid = c.uid
+		} else if uid != c.uid {
+			return
+		}
+	}
+	err = nil
+	return
+}
+
 func intersect_helper(min time.Time, max time.Time, start time.Time, duration time.Duration) bool {
 	if max.IsZero() && start.Add(duration).After(min) || start.Equal(min) && duration == 0 {
 		return true

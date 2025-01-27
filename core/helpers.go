@@ -22,6 +22,7 @@ var (
 	statusNotFound                                       = statusHelper(http.StatusNotFound)
 	statusFailedDependency                               = statusHelper(http.StatusFailedDependency)
 	statusForbidden                                      = statusHelper(http.StatusForbidden)
+	statusBadRequest                                     = statusHelper(http.StatusBadRequest)
 	principalURL, currentUserPrincipal, principalAddress = newPrincipalURL("/")
 	defaultSupportedAddressData                          = supportedAddressDataHelper("3.0", "4.0")
 	defaultSupportedCalendarComponentSet                 = supportedCalendarComponentSetHelper("VEVENT", "VTODO", "VJOURNAL")
@@ -162,8 +163,7 @@ func supportedReportSetHelper(names ...xml.Name) *Any {
 	}
 }
 
-// String method for Scope to provide a human-readable representation
-func (s Scope) SupportedReportSet() *Any {
+func (s Scope) supportedReportSet() *Any {
 	switch s {
 	case CalendarScope:
 		return supportedReportSetHelper(calendarQueryName, calendarMultiGetName)
@@ -237,7 +237,7 @@ outer:
 
 func CleanProps(scope Scope, props_Found []Any, propName *struct{}, include *Include, allProp *struct{}, reqProp *Prop) (propstats []PropStat) {
 	props_Found = append(props_Found, currentUserPrincipal, principalURL)
-	if a := scope.SupportedReportSet(); a != nil {
+	if a := scope.supportedReportSet(); a != nil {
 		props_Found = append(props_Found, *a)
 	}
 
@@ -473,7 +473,6 @@ func IfMatchifNoneMatch(etag string, ifmatch string, ifnonematch string) (err er
 	return
 }
 
-// calendar data helper
 func CalendarData(cal *ical.Calendar, prop *Prop) (*Any, error) {
 	if prop == nil {
 		return nil, nil
@@ -545,7 +544,6 @@ func CalendarData(cal *ical.Calendar, prop *Prop) (*Any, error) {
 	}, nil
 }
 
-// calendar data helper
 func AddressData(card vcard.Card, prop *Prop) (*Any, error) {
 	if prop == nil {
 		return nil, nil
@@ -620,21 +618,53 @@ func parsePropertyUpdate(pp *PropertyUpdate) (remove_props []Any, set_props []An
 	return
 }
 
-func PropPatchHelper(current_prop *Prop, property_update *PropertyUpdate) (ms *MultiStatus, new_prop *Prop) {
+var protected_webdav = []xml.Name{resourceTypeName}
+var protected_calendar = []xml.Name{supportedCalendarComponentSetName, supportedCalendarDataName, calendarMaxResourceSizeName, minDateTimeName, maxDateTimeName, maxInstancesName, maxAttendeesPerInstanceName, calendarSupportedCollationSetName}
+var protected_addressbook = []xml.Name{supportedAddressDataName, addressbookMaxResourceSizeName, addressbookSupportedCollationSetName}
+
+func isProtected(scope Scope, prop_name xml.Name) bool {
+	for _, p := range protected_webdav {
+		if p == prop_name {
+			return true
+		}
+	}
+	switch scope {
+	case CalendarScope:
+		for _, p := range protected_calendar {
+			if p == prop_name {
+				return true
+			}
+		}
+	case AddressbookScope:
+		for _, p := range protected_addressbook {
+			if p == prop_name {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func PropPatchHelper(scope Scope, current_prop *Prop, property_update *PropertyUpdate) (ms *MultiStatus, new_prop *Prop) {
 	remove_props, set_props := parsePropertyUpdate(property_update)
 
 	new_props := make([]Any, 0, len(current_prop.Props))
 
 	status_OK := make([]Any, 0, len(current_prop.Props))
+	status_Protected := make([]Any, 0, 1)
 
 outer1:
 	for _, val := range current_prop.Props {
 		for _, remove := range remove_props {
 			// todo: do not allow removal of protected props
-			if val.XMLName == remove.XMLName {
+			if val.XMLName != remove.XMLName {
+				continue
+			} else if isProtected(scope, remove.XMLName) {
+				status_Protected = append(status_Protected, Any{XMLName: remove.XMLName})
+			} else {
 				status_OK = append(status_OK, Any{XMLName: remove.XMLName})
-				continue outer1
 			}
+			continue outer1
 		}
 		new_props = append(new_props, val)
 	}
@@ -642,8 +672,13 @@ outer1:
 	status_NotFound := make([]Any, 0, 2)
 outer2:
 	for _, remove := range remove_props {
-		for _, ok := range status_OK {
-			if ok.XMLName == remove.XMLName {
+		for _, n := range status_OK {
+			if n.XMLName == remove.XMLName {
+				continue outer2
+			}
+		}
+		for _, n := range status_Protected {
+			if n.XMLName == remove.XMLName {
 				continue outer2
 			}
 		}
@@ -652,51 +687,55 @@ outer2:
 
 outer3:
 	for _, set := range set_props {
+		if isProtected(scope, set.XMLName) {
+			status_Protected = append(status_Protected, Any{XMLName: set.XMLName})
+			continue outer3
+		}
+		// not protected
 		status_OK = append(status_OK, Any{XMLName: set.XMLName})
 		for k, val := range new_props {
-			// todo: do not allow setting of protected props
-			if val.XMLName == set.XMLName {
-				new_props[k] = set
-				continue outer3
+			if val.XMLName != set.XMLName {
+				continue
 			}
+			new_props[k] = set
+			continue outer3
 		}
 		new_props = append(new_props, set)
 	}
 
+	prop_stats := make([]PropStat, 0, 3)
 	if len(status_NotFound) != 0 {
-		resp := Response{
-			PropStats: []PropStat{{
-				Prop: Prop{
-					Props: status_OK,
-				},
-				Status: statusFailedDependency,
-			}, {
-				Prop: Prop{
-					Props: status_NotFound,
-				},
-				Status: statusNotFound,
-			}},
-		}
-		ms = &MultiStatus{
-			Responses: []Response{resp},
-		}
-		return
-	} else {
-		resp := Response{
-			PropStats: []PropStat{{
-				Prop: Prop{
-					Props: status_OK,
-				},
-				Status: statusOK,
-			}},
-		}
-		ms = &MultiStatus{
-			Responses: []Response{resp},
-		}
+		prop_stats = append(prop_stats, PropStat{Prop: Prop{Props: status_NotFound}, Status: statusNotFound})
 	}
-	new_prop = &Prop{
-		Props: filterProps(new_props),
+	if len(status_Protected) != 0 {
+		e := &davError{Conditions: []Any{{XMLName: xml.Name{Space: "DAV:", Local: "cannot-modify-protected-property"}}}}
+		prop_stats = append(prop_stats, PropStat{Prop: Prop{Props: status_Protected}, Status: statusForbidden, Error: e})
 	}
+	if len(status_OK) != 0 {
+		status := statusOK
+		if len(prop_stats) != 0 {
+			status = statusFailedDependency
+		} else {
+			// statusOK
+			new_prop = &Prop{
+				Props: filterProps(new_props),
+			}
+		}
+		prop_stats = append(prop_stats, PropStat{
+			Prop: Prop{
+				Props: status_OK,
+			},
+			Status: status,
+		})
+	}
+
+	resp := Response{
+		PropStats: prop_stats,
+	}
+	ms = &MultiStatus{
+		Responses: []Response{resp},
+	}
+
 	return
 }
 
@@ -786,11 +825,38 @@ func CheckAddressDataSupportedAndValid(content_type_header string, request_body 
 			Code:      http.StatusForbidden,
 			Condition: &validAddressDataName,
 		}
+	} else if v := c.Get(vcard.FieldFormattedName); v == nil {
+		err = &webDAVerror{
+			Code:      http.StatusForbidden,
+			Condition: &validAddressDataName,
+		}
+	} else if v := c.Get(vcard.FieldUID); v == nil {
+		err = &webDAVerror{
+			Code:      http.StatusForbidden,
+			Condition: &validAddressDataName,
+		}
 	} else {
 		vcard.ToV4(c)
 		card = c
 	}
 	return
+}
+
+func CheckMaxResourceSize(collection_prop *Prop, size int) error {
+	// will panic if collection_prop is nil
+	for _, a := range collection_prop.Props {
+		if a.XMLName.Local == "max-resource-size" {
+			if l, e := strconv.ParseInt(fmt.Sprintf("%s", a.Content), 10, 64); e != nil {
+				return e
+			} else if l < int64(size) {
+				return &webDAVerror{
+					Code:      http.StatusForbidden,
+					Condition: &a.XMLName,
+				}
+			}
+		}
+	}
+	return nil
 }
 
 func CheckMkColReq(scope Scope, prop_req []Prop) (resp []PropStat, prop_write Prop, err error) {
@@ -800,6 +866,20 @@ func CheckMkColReq(scope Scope, prop_req []Prop) (resp []PropStat, prop_write Pr
 	for _, prop := range prop_req {
 		for _, a := range prop.Props {
 			switch a.XMLName {
+			case calendarMaxResourceSizeName, addressbookMaxResourceSizeName:
+				if _, e := strconv.ParseInt(fmt.Sprintf("%s", a.Content), 10, 64); e != nil {
+					bad_props = append(bad_props, PropStat{
+						Prop: Prop{
+							Props: []Any{{
+								XMLName: a.XMLName,
+							}},
+						},
+						Status: statusBadRequest,
+					})
+				} else {
+					new_props = append(new_props, Any{XMLName: a.XMLName})
+					write_props = append(write_props, a)
+				}
 			case resourceTypeName:
 				var check int
 				d := xml.NewDecoder(bytes.NewBuffer(a.Content))

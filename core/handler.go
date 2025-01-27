@@ -318,10 +318,29 @@ mux:
 			w.Header().Add("Content-Type", "text/xml; charset=utf-8")
 			body = b
 		}
+	} else if uc, ok := err.(*UidConflict); ok {
+		code = http.StatusForbidden
+		condition := Any{}
+		if b, e := xml.Marshal(uc.Href); e != nil {
+			panic(e)
+		} else {
+			condition.Content = b
+			switch uc.Scope {
+			case CalendarScope:
+				condition.XMLName = calendarNoUIDConflictName
+			case AddressbookScope:
+				condition.XMLName = addressbookNoUIDConflictName
+			}
+		}
+		if b, e := xml.Marshal(&davError{Conditions: []Any{condition}}); e != nil {
+			panic(e)
+		} else {
+			w.Header().Add("Content-Type", "text/xml; charset=utf-8")
+			body = b
+		}
 	} else {
 		code = http.StatusInternalServerError
 	}
-
 	w.WriteHeader(code)
 	w.Write(body)
 }

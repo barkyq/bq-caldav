@@ -64,15 +64,23 @@ var (
 	supportedCalendarComponentSetName = xml.Name{Space: "urn:ietf:params:xml:ns:caldav", Local: "supported-calendar-component-set"}
 	compName                          = xml.Name{Space: "urn:ietf:params:xml:ns:caldav", Local: "comp"}
 	calendarTimezoneName              = xml.Name{Space: "urn:ietf:params:xml:ns:caldav", Local: "calendar-timezone"}
+	calendarMaxResourceSizeName       = xml.Name{Space: "urn:ietf:params:xml:ns:caldav", Local: "max-resource-size"}
+	minDateTimeName                   = xml.Name{Space: "urn:ietf:params:xml:ns:caldav", Local: "min-date-time"}
+	maxDateTimeName                   = xml.Name{Space: "urn:ietf:params:xml:ns:caldav", Local: "max-date-time"}
+	maxInstancesName                  = xml.Name{Space: "urn:ietf:params:xml:ns:caldav", Local: "max-instances"}
+	maxAttendeesPerInstanceName       = xml.Name{Space: "urn:ietf:params:xml:ns:caldav", Local: "max-attendees-per-instance"}
+	calendarSupportedCollationSetName = xml.Name{Space: "urn:ietf:params:xml:ns:caldav", Local: "supported-collation-set"}
 
-	addressbookTypeName      = xml.Name{Space: "urn:ietf:params:xml:ns:carddav", Local: "addressbook"}
-	addressbookHomeSetName   = xml.Name{Space: "urn:ietf:params:xml:ns:carddav", Local: "addressbook-home-set"}
-	principalAddressName     = xml.Name{Space: "urn:ietf:params:xml:ns:carddav", Local: "principal-address"}
-	addressbookQueryName     = xml.Name{Space: "urn:ietf:params:xml:ns:carddav", Local: "addressbook-query"}
-	addressbookMultiGetName  = xml.Name{Space: "urn:ietf:params:xml:ns:carddav", Local: "addressbook-multiget"}
-	addressDataName          = xml.Name{Space: "urn:ietf:params:xml:ns:carddav", Local: "address-data"}
-	supportedAddressDataName = xml.Name{Space: "urn:ietf:params:xml:ns:carddav", Local: "supported-address-data"}
-	addressDataTypeName      = xml.Name{Space: "urn:ietf:params:xml:ns:carddav", Local: "address-data-type"}
+	addressbookTypeName                  = xml.Name{Space: "urn:ietf:params:xml:ns:carddav", Local: "addressbook"}
+	addressbookHomeSetName               = xml.Name{Space: "urn:ietf:params:xml:ns:carddav", Local: "addressbook-home-set"}
+	principalAddressName                 = xml.Name{Space: "urn:ietf:params:xml:ns:carddav", Local: "principal-address"}
+	addressbookQueryName                 = xml.Name{Space: "urn:ietf:params:xml:ns:carddav", Local: "addressbook-query"}
+	addressbookMultiGetName              = xml.Name{Space: "urn:ietf:params:xml:ns:carddav", Local: "addressbook-multiget"}
+	addressDataName                      = xml.Name{Space: "urn:ietf:params:xml:ns:carddav", Local: "address-data"}
+	supportedAddressDataName             = xml.Name{Space: "urn:ietf:params:xml:ns:carddav", Local: "supported-address-data"}
+	addressDataTypeName                  = xml.Name{Space: "urn:ietf:params:xml:ns:carddav", Local: "address-data-type"}
+	addressbookMaxResourceSizeName       = xml.Name{Space: "urn:ietf:params:xml:ns:carddav", Local: "max-resource-size"}
+	addressbookSupportedCollationSetName = xml.Name{Space: "urn:ietf:params:xml:ns:carddav", Local: "supported-collation-set"}
 )
 
 var allpropInclusions = []xml.Name{
@@ -155,8 +163,10 @@ var (
 	validCalendarDataName           = xml.Name{Space: "urn:ietf:params:xml:ns:caldav", Local: "valid-calendar-data"}
 	validCalendarObjectResourceName = xml.Name{Space: "urn:ietf:params:xml:ns:caldav", Local: "valid-calendar-object-resource"}
 	supportedCalendarComponentName  = xml.Name{Space: "urn:ietf:params:xml:ns:caldav", Local: "supported-calendar-component"}
+	calendarNoUIDConflictName       = xml.Name{Space: "urn:ietf:params:xml:ns:caldav", Local: "no-uid-conflict"}
 
-	validAddressDataName = xml.Name{Space: "urn:ietf:params:xml:ns:carddav", Local: "valid-address-data"}
+	addressbookNoUIDConflictName = xml.Name{Space: "urn:ietf:params:xml:ns:carddav", Local: "no-uid-conflict"}
+	validAddressDataName         = xml.Name{Space: "urn:ietf:params:xml:ns:carddav", Local: "valid-address-data"}
 )
 
 // Report Sets
@@ -340,7 +350,9 @@ func (r *Any) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
 					depth--
 				}
 			case xml.CharData:
-				buf.Write(t)
+				if bytes.TrimSpace(t) != nil {
+					xml.EscapeText(buf, t)
+				}
 			}
 		}
 	}
