@@ -4,7 +4,6 @@
 - supports a single calendar-home-set (at `"/calendars/"`)
 - supports a single addressbook-home-set (at `"/addressbook/"`)
 - supports gzip compression of responses
-- calendar collection supported-component-set contains only `VEVENT`
 
 ## running
 
