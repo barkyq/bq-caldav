@@ -343,7 +343,7 @@ func (b *FSBackend) PropPatch(r *http.Request, property_update *core.PropertyUpd
 
 	current_prop := &core.Prop{}
 	if f, e := b.fsys.Open(p); e != nil {
-		err = e
+		err = core.WebDAVerror(http.StatusNotFound, nil)
 	} else if e := xml.NewDecoder(f).Decode(current_prop); e != nil {
 		err = e
 	}

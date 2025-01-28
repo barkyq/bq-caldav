@@ -730,6 +730,7 @@ func PropPatchHelper(scope Scope, current_prop *Prop, property_update *PropertyU
 
 	status_OK := make([]Any, 0, len(current_prop.Props))
 	status_Protected := make([]Any, 0, 1)
+	status_BadRequest := make([]Any, 0, 1)
 
 outer1:
 	for _, val := range current_prop.Props {
@@ -768,6 +769,13 @@ outer3:
 		if isProtected(scope, set.XMLName) {
 			status_Protected = append(status_Protected, Any{XMLName: set.XMLName})
 			continue outer3
+		} else if set.XMLName == calendarTimezoneName {
+			if encoded, e := checkTimezoneInReq(set.Content); e != nil {
+				status_BadRequest = append(status_BadRequest, Any{XMLName: set.XMLName})
+				continue outer3
+			} else {
+				set.Content = encoded
+			}
 		}
 		// not protected
 		status_OK = append(status_OK, Any{XMLName: set.XMLName})
@@ -781,13 +789,17 @@ outer3:
 		new_props = append(new_props, set)
 	}
 
-	prop_stats := make([]PropStat, 0, 3)
+	prop_stats := make([]PropStat, 0, 4)
 	if len(status_NotFound) != 0 {
 		prop_stats = append(prop_stats, PropStat{Prop: Prop{Props: status_NotFound}, Status: statusNotFound})
 	}
 	if len(status_Protected) != 0 {
 		e := &davError{Conditions: []Any{{XMLName: xml.Name{Space: "DAV:", Local: "cannot-modify-protected-property"}}}}
 		prop_stats = append(prop_stats, PropStat{Prop: Prop{Props: status_Protected}, Status: statusForbidden, Error: e})
+	}
+	if len(status_BadRequest) != 0 {
+		e := &davError{Conditions: []Any{{XMLName: validCalendarDataName}}}
+		prop_stats = append(prop_stats, PropStat{Prop: Prop{Props: status_BadRequest}, Status: statusBadRequest, Error: e})
 	}
 	if len(status_OK) != 0 {
 		status := statusOK
@@ -997,6 +1009,38 @@ func CheckOtherCalendarPreconditions(collection_prop *Prop, md *CalendarMetaData
 	return nil
 }
 
+// used in CheckMkColReq and in PropFind
+func checkTimezoneInReq(content []byte) (encoded []byte, err error) {
+	err = fmt.Errorf("invalid timezone content")
+	br := bytes.NewReader(content)
+	d := xml.NewDecoder(br)
+	if t, e := d.Token(); e != nil {
+		//
+	} else if cd, ok := t.(xml.CharData); !ok {
+		//
+	} else if br.Reset(cd); false {
+		//
+	} else if tz_cal, e := ical.NewDecoder(br).Decode(); e != nil || len(tz_cal.Children) != 1 {
+		//
+	} else if tz_comp := tz_cal.Children[0]; tz_comp.Name != ical.CompTimezone {
+		//
+	} else if tz_id_prop := tz_comp.Props.Get(ical.PropTimezoneID); tz_id_prop == nil {
+		//
+	} else if _, e := time.LoadLocation(tz_id_prop.Value); e != nil {
+		err = e
+	} else if buf, esc := bytes.NewBuffer(nil), bytes.NewBuffer(nil); false {
+		//
+	} else if e := ical.NewEncoder(buf).Encode(tz_cal); e != nil {
+		err = e
+	} else if e := xml.EscapeText(esc, buf.Bytes()); e != nil {
+		err = e
+	} else {
+		encoded = esc.Bytes()
+		err = nil
+	}
+	return
+}
+
 func CheckMkColReq(scope Scope, prop_req []Prop) (resp []PropStat, prop_write Prop, err error) {
 	new_props := make([]Any, 0, 16)
 	bad_props := make([]PropStat, 0, 4)
@@ -1032,9 +1076,24 @@ func CheckMkColReq(scope Scope, prop_req []Prop) (resp []PropStat, prop_write Pr
 					new_props = append(new_props, Any{XMLName: a.XMLName})
 					write_props = append(write_props, a)
 				}
+			case calendarTimezoneName:
+				if encoded, e := checkTimezoneInReq(a.Content); e != nil {
+					bad_props = append(bad_props, PropStat{
+						Prop: Prop{
+							Props: []Any{{
+								XMLName: a.XMLName,
+							}},
+						},
+						Status: statusBadRequest,
+					})
+				} else {
+					a.Content = encoded
+					new_props = append(new_props, Any{XMLName: a.XMLName})
+					write_props = append(write_props, a)
+				}
 			case resourceTypeName:
 				var check int
-				d := xml.NewDecoder(bytes.NewBuffer(a.Content))
+				d := xml.NewDecoder(bytes.NewReader(a.Content))
 				for {
 					if tok, e := d.Token(); errors.Is(e, io.EOF) {
 						break
