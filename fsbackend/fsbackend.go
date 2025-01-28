@@ -248,6 +248,7 @@ func (b *FSBackend) Put(r *http.Request) (err error) {
 	return
 }
 
+// only used in PUT request
 func (b *FSBackend) checkCalendarObject(r *http.Request, p string, cal *ical.Calendar) (io.Reader, error) {
 	// if `if-match` or `if-none-match` fails return 412 precondition failed
 	// https://datatracker.ietf.org/doc/html/rfc7232
@@ -255,7 +256,10 @@ func (b *FSBackend) checkCalendarObject(r *http.Request, p string, cal *ical.Cal
 
 	collection_prop := &core.Prop{}
 	if pf, e := b.fsys.Open(path.Join(path.Dir(p), "props.xml")); e != nil {
-		return nil, core.WebDAVerror(http.StatusForbidden, &xml.Name{Space: "urn:ietf:params:xml:ns:caldav", Local: "calendar-collection-location-ok"})
+		return nil, core.WebDAVerror(http.StatusForbidden, &xml.Name{
+			Space: "urn:ietf:params:xml:ns:caldav",
+			Local: "calendar-collection-location-ok",
+		})
 	} else if e := xml.NewDecoder(pf).Decode(collection_prop); e != nil {
 		return nil, e
 	}
@@ -272,7 +276,13 @@ func (b *FSBackend) checkCalendarObject(r *http.Request, p string, cal *ical.Cal
 	//
 	buf := bytes.NewBuffer(nil)
 
-	if md, e := core.ParseCalendarObjectResource(cal); e != nil {
+	loc, err := core.GetLocationFromProp(collection_prop)
+	if err != nil {
+		return nil, err
+	}
+
+	// should pass calendar-timezone if it exists instead of `nil`
+	if md, e := core.ParseCalendarObjectResource(cal, loc); e != nil {
 		return nil, e
 	} else if e := core.CheckCalendarCompIsSupported(collection_prop, md.ComponentType); e != nil {
 		return nil, e
@@ -529,10 +539,44 @@ func (b *FSBackend) propFindFile(p string, fi fs.FileInfo) (props_Found []core.A
 // REPORT calendar-query or addressbook-query
 func (b *FSBackend) Query(r *http.Request, query *core.Query, depth byte) (ms *core.MultiStatus, err error) {
 	query_scope := query.Scope()
+	p := path.Clean(r.URL.Path)[1:]
+	if p == "" {
+		p = "."
+	}
+	b.lock.Lock()
+	defer b.lock.Unlock()
+
 	switch getScope(r.URL.Path) {
 	case core.CalendarScope:
 		if query_scope != core.CalendarScope {
 			err = core.WebDAVerror(http.StatusBadRequest, nil)
+			return
+		} else if query.Timezone == nil {
+			// need to get timezone
+			err = core.WebDAVerror(http.StatusMethodNotAllowed, nil)
+			var propsdotxmlpath string
+			if d := len(strings.Split(p, "/")); d == 2 {
+				propsdotxmlpath = path.Join(p, "props.xml")
+			} else if d == 3 {
+				propsdotxmlpath = path.Join(path.Dir(p), "props.xml")
+			} else {
+				return
+			}
+			err = core.WebDAVerror(http.StatusInternalServerError, nil)
+			collection_prop := &core.Prop{}
+			if pf, e := b.fsys.Open(propsdotxmlpath); e != nil {
+				return
+			} else if e := xml.NewDecoder(pf).Decode(collection_prop); e != nil {
+				return
+			} else if loc, e := core.GetLocationFromProp(collection_prop); e != nil {
+				return
+			} else {
+				err = nil
+				query.Timezone = &core.Timezone{Location: loc}
+			}
+		}
+		if e := query.ParseCalendarData(); e != nil {
+			err = e
 			return
 		}
 	case core.AddressbookScope:
@@ -541,16 +585,7 @@ func (b *FSBackend) Query(r *http.Request, query *core.Query, depth byte) (ms *c
 			return
 		}
 	}
-
-	b.lock.Lock()
-	defer b.lock.Unlock()
-
 	ms = &core.MultiStatus{}
-
-	p := path.Clean(r.URL.Path)[1:]
-	if p == "" {
-		p = "."
-	}
 
 	if fi, e := fs.Stat(b.fsys, p); e != nil {
 		// empty return means empty multistatus
@@ -615,8 +650,9 @@ func (b *FSBackend) queryFile(p string, fi fs.FileInfo, query *core.Query) (resp
 			err = e
 			return
 		} else if !m {
+			// did not match
 			return
-		} else if a, e := core.CalendarData(cal, query.Prop); e != nil {
+		} else if a, e := core.CalendarData(cal, query.CalendarData); e != nil {
 			// internal server error or webdav not-implemented
 			err = e
 			return
@@ -729,7 +765,7 @@ jump:
 		// now write calendar-data
 		if cal, e := ical.NewDecoder(file).Decode(); e != nil {
 			return
-		} else if a, e := core.CalendarData(cal, multiget.Prop); e != nil {
+		} else if a, e := core.CalendarData(cal, multiget.CalendarData); e != nil {
 			return
 		} else if a != nil {
 			props_Found = append(props_Found, *a)
@@ -765,7 +801,7 @@ func (b *FSBackend) Options(r *http.Request) (caps []string, allow []string) {
 
 	if p == "/" {
 		caps = []string{"1", "3", "calendar-access", "addressbook", "extended-mkcol"}
-		allow = []string{http.MethodOptions, "PROPFIND", "REPORT"}
+		allow = []string{http.MethodOptions, "PROPFIND"}
 		return
 	} else if p == "/me.vcf" {
 		caps = []string{"1"}
@@ -778,7 +814,7 @@ func (b *FSBackend) Options(r *http.Request) (caps []string, allow []string) {
 		caps = []string{"1", "3", "calendar-access", "extended-mkcol"}
 		switch len(components) {
 		case 1: // path targets /calendars
-			allow = []string{http.MethodOptions, "PROPFIND", "REPORT"}
+			allow = []string{http.MethodOptions, "PROPFIND"}
 		case 2: // path targets /calendars/X
 			allow = []string{http.MethodOptions, "PROPFIND", "REPORT", "PROPPATCH", "MKCOL", "MKCALENDAR", "DELETE"}
 		case 3: // path targets /calendars/X/Y
@@ -788,7 +824,7 @@ func (b *FSBackend) Options(r *http.Request) (caps []string, allow []string) {
 		caps = []string{"1", "3", "addressbook", "extended-mkcol"}
 		switch len(components) {
 		case 1: // path targets /addressbook
-			allow = []string{http.MethodOptions, "PROPFIND", "REPORT"}
+			allow = []string{http.MethodOptions, "PROPFIND"}
 		case 2: // path targets /addressbook/X
 			allow = []string{http.MethodOptions, "PROPFIND", "REPORT", "PROPPATCH", "MKCOL", "DELETE"}
 		case 3: // path targets /addressbook/X/Y

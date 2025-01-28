@@ -354,10 +354,10 @@ func MatchCalendarWithQuery(cal *ical.Calendar, query *Query) (bool, error) {
 		return false, nil
 	}
 
-	return matchCompFilterWithComp(query.CalendarFilter.CompFilter, cal.Component)
+	return matchCompFilterWithComp(query.CalendarFilter.CompFilter, cal.Component, query.Timezone.Location)
 }
 
-func matchCompFilterWithComp(cf compFilter, comp *ical.Component) (match bool, err error) {
+func matchCompFilterWithComp(cf compFilter, comp *ical.Component, location *time.Location) (match bool, err error) {
 	if b, e := xml.Marshal(&cf); e != nil {
 		return false, &webDAVerror{Code: http.StatusBadRequest}
 	} else {
@@ -392,7 +392,7 @@ func matchCompFilterWithComp(cf compFilter, comp *ical.Component) (match bool, e
 				end_time = t
 			}
 		}
-		if data, e := parseCalendarComponent(comp); e != nil {
+		if data, e := parseCalendarComponent(comp, location); e != nil {
 			return false, e
 		} else if data.Intersect(start_time, end_time) {
 			return true, nil
@@ -403,13 +403,13 @@ func matchCompFilterWithComp(cf compFilter, comp *ical.Component) (match bool, e
 		// prop filter not implemented
 		return false, err
 	case cf.CompFilters != nil:
-		return matchCompFiltersWithCompChildren(cf.CompFilters, comp.Children)
+		return matchCompFiltersWithCompChildren(cf.CompFilters, comp.Children, location)
 	default:
 		return true, nil
 	}
 }
 
-func matchCompFiltersWithCompChildren(cfs []compFilter, children []*ical.Component) (match bool, err error) {
+func matchCompFiltersWithCompChildren(cfs []compFilter, children []*ical.Component, location *time.Location) (match bool, err error) {
 outer:
 	for _, cf := range cfs {
 		for _, child := range children {
@@ -417,7 +417,7 @@ outer:
 				continue
 			} else if cf.IsNotDefined != nil {
 				return false, nil
-			} else if match, err = matchCompFilterWithComp(cf, child); err != nil {
+			} else if match, err = matchCompFilterWithComp(cf, child, location); err != nil {
 				return false, err
 			} else if match {
 				continue outer
@@ -482,7 +482,17 @@ func IfMatchifNoneMatch(etag string, ifmatch string, ifnonematch string) (err er
 	return
 }
 
-func partialRetrieval(source *ical.Component, compReq *compReq, cdReq *calendarDataReq) (partial *ical.Component, err error) {
+func expandCalendar(source *ical.Calendar, expand *Any) (expanded *ical.Calendar, err error) {
+	expanded = source
+	return
+}
+
+func limitRecurrenceSet(source *ical.Calendar, limit_recurrence_set *Any) (limited *ical.Calendar, err error) {
+	limited = source
+	return
+}
+
+func partialRetrieval(source *ical.Component, compReq *compReq) (partial *ical.Component, err error) {
 	if source.Name != compReq.Name {
 		return
 	}
@@ -490,10 +500,6 @@ func partialRetrieval(source *ical.Component, compReq *compReq, cdReq *calendarD
 	var required []string
 
 	source.Props.SetText(ical.PropProductID, "-//bq-caldav//partial-retrieval//EN")
-	// TODO:
-	// cdReq.Expand
-	// cdReq.LimitRecurrenceSet
-	// cdReq.LimitFreeBusySet
 
 	// need to do this, even though CalDAV RFC allows absence of required properties
 	// because go-ical will not encode if required properties are missing.
@@ -555,7 +561,7 @@ func partialRetrieval(source *ical.Component, compReq *compReq, cdReq *calendarD
 	for _, c := range compReq.Comps {
 		for _, source_child := range source.Children {
 			if source_child.Name == c.Name {
-				if child, e := partialRetrieval(source_child, &c, cdReq); e != nil {
+				if child, e := partialRetrieval(source_child, &c); e != nil {
 					return nil, e
 				} else {
 					partial.Children = append(partial.Children, child)
@@ -566,41 +572,71 @@ func partialRetrieval(source *ical.Component, compReq *compReq, cdReq *calendarD
 	return partial, nil
 }
 
-func CalendarData(cal *ical.Calendar, prop *Prop) (*Any, error) {
-	if prop == nil {
-		return nil, nil
-	}
+func (query *Query) ParseCalendarData() error {
 	var cdata *Any
-	for _, val := range prop.Props {
+	if query.Prop == nil {
+		return nil
+	}
+	for _, val := range query.Prop.Props {
 		if val.XMLName == calendarDataName {
 			cdata = &val
 			break
 		}
 	}
+
 	if cdata == nil {
-		return nil, nil
+		return nil
 	}
 	if cdata.Content != nil {
 		buf := bytes.NewBufferString("<calendar-data xmlns=\"urn:ietf:params:xml:ns:caldav\">")
 		buf.Write(cdata.Content)
 		buf.WriteString("</calendar-data>")
-		cd := &calendarDataReq{}
+		cd := &CalendarDataReq{}
 		if e := xml.NewDecoder(buf).Decode(cd); e != nil {
-			fmt.Println(e.Error())
-			return nil, &webDAVerror{
+			return &webDAVerror{
 				Code: http.StatusInternalServerError,
 			}
-		} else if c, e := partialRetrieval(cal.Component, cd.CompReq, cd); e != nil {
-			return nil, e
 		} else {
-			cal = &ical.Calendar{Component: c}
+			query.CalendarData = cd
 		}
+	} else {
+		query.CalendarData = &CalendarDataReq{}
+	}
+	return nil
+}
+
+func CalendarData(cal *ical.Calendar, cd *CalendarDataReq) (*Any, error) {
+	if cd == nil {
+		return nil, nil
+	}
+
+	if cd.Expand == nil {
+		// do nothing
+	} else if c, e := expandCalendar(cal, cd.Expand); e != nil {
+		return nil, e
+	} else {
+		cal = c
+	}
+
+	if cd.LimitRecurrenceSet == nil {
+		// do nothing
+	} else if c, e := limitRecurrenceSet(cal, cd.LimitRecurrenceSet); e != nil {
+		return nil, e
+	} else {
+		cal = c
+	}
+
+	if cd.CompReq == nil {
+		// do nothing
+	} else if c, e := partialRetrieval(cal.Component, cd.CompReq); e != nil {
+		return nil, e
+	} else {
+		cal = &ical.Calendar{Component: c}
 	}
 
 	raw, escaped := bytes.NewBuffer(nil), bytes.NewBuffer(nil)
 	if e := ical.NewEncoder(raw).Encode(cal); e != nil {
 		// this will be bubbled up to internal server error
-		fmt.Println(e.Error())
 		return nil, e
 	} else if e := xml.EscapeText(escaped, raw.Bytes()); e != nil {
 		// this will be bubbled up to internal server error
@@ -1007,6 +1043,37 @@ func CheckOtherCalendarPreconditions(collection_prop *Prop, md *CalendarMetaData
 		}
 	}
 	return nil
+}
+
+func GetLocationFromProp(prop *Prop) (loc *time.Location, err error) {
+	for _, p := range prop.Props {
+		if p.XMLName != calendarTimezoneName {
+			continue
+		}
+		err = fmt.Errorf("invalid timezone content")
+		br := bytes.NewReader(p.Content)
+		d := xml.NewDecoder(br)
+		if t, e := d.Token(); e != nil {
+			//
+		} else if cd, ok := t.(xml.CharData); !ok {
+			//
+		} else if br.Reset(cd); false {
+			//
+		} else if tz_cal, e := ical.NewDecoder(br).Decode(); e != nil || len(tz_cal.Children) != 1 {
+			//
+		} else if tz_comp := tz_cal.Children[0]; tz_comp.Name != ical.CompTimezone {
+			//
+		} else if tz_id_prop := tz_comp.Props.Get(ical.PropTimezoneID); tz_id_prop == nil {
+			//
+		} else if l, e := time.LoadLocation(tz_id_prop.Value); e != nil {
+			err = e
+		} else {
+			loc = l
+			err = nil
+		}
+		return
+	}
+	return
 }
 
 // used in CheckMkColReq and in PropFind

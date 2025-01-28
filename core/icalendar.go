@@ -144,7 +144,7 @@ func parseDuration(val string) (dur time.Duration, err error) {
 	return time.Duration(seconds) * time.Second, nil
 }
 
-func parseJournal(comp *ical.Component) (data *compData, err error) {
+func parseJournal(comp *ical.Component, timezone *time.Location) (data *compData, err error) {
 	data = &compData{}
 
 	// get UID
@@ -159,7 +159,7 @@ func parseJournal(comp *ical.Component) (data *compData, err error) {
 	// if there is no dtstart, it should not match any filter
 	// so we can leave it unset
 	if val := comp.Props.Get(ical.PropDateTimeStart); val != nil {
-		if t, e := val.DateTime(nil); e != nil {
+		if t, e := val.DateTime(timezone); e != nil {
 			err = e
 			return
 		} else {
@@ -191,7 +191,7 @@ func parseJournal(comp *ical.Component) (data *compData, err error) {
 	return
 }
 
-func parseEvent(comp *ical.Component) (data *compData, err error) {
+func parseEvent(comp *ical.Component, timezone *time.Location) (data *compData, err error) {
 	data = &compData{}
 	err = fmt.Errorf("parse error")
 
@@ -205,7 +205,7 @@ func parseEvent(comp *ical.Component) (data *compData, err error) {
 	rrule_buf := bytes.NewBuffer(nil)
 
 	if val := comp.Props.Get(ical.PropDateTimeStart); val != nil {
-		if t, e := val.DateTime(nil); e != nil {
+		if t, e := val.DateTime(timezone); e != nil {
 			err = e
 			return
 		} else {
@@ -237,7 +237,7 @@ func parseEvent(comp *ical.Component) (data *compData, err error) {
 			data.duration = d
 		}
 	} else if comp.Props.Get(ical.PropDateTimeEnd); val != nil {
-		if t, e := val.DateTime(nil); e != nil {
+		if t, e := val.DateTime(timezone); e != nil {
 			err = e
 			return
 		} else {
@@ -254,7 +254,7 @@ func parseEvent(comp *ical.Component) (data *compData, err error) {
 
 	// get recurrenceid
 	if val := comp.Props.Get(ical.PropRecurrenceID); val != nil {
-		if t, e := val.DateTime(nil); e != nil {
+		if t, e := val.DateTime(timezone); e != nil {
 			err = e
 			return
 		} else {
@@ -300,6 +300,7 @@ func parseEvent(comp *ical.Component) (data *compData, err error) {
 			return
 		}
 	}
+
 	if r, e := rrule.StrToRRuleSet(rrule_buf.String()); e != nil {
 		return
 	} else {
@@ -320,7 +321,7 @@ func parseEvent(comp *ical.Component) (data *compData, err error) {
 	return
 }
 
-func parseTodo(comp *ical.Component) (data *compData, err error) {
+func parseTodo(comp *ical.Component, timezone *time.Location) (data *compData, err error) {
 	data = &compData{}
 	err = fmt.Errorf("parse error")
 
@@ -334,7 +335,7 @@ func parseTodo(comp *ical.Component) (data *compData, err error) {
 	rrule_buf := bytes.NewBuffer(nil)
 
 	if val := comp.Props.Get(ical.PropDateTimeStart); val != nil {
-		if t, e := val.DateTime(nil); e != nil {
+		if t, e := val.DateTime(timezone); e != nil {
 			err = e
 			return
 		} else {
@@ -345,7 +346,7 @@ func parseTodo(comp *ical.Component) (data *compData, err error) {
 	// get due OR duration
 	if val := comp.Props.Get(ical.PropDue); val != nil {
 		var due time.Time
-		if t, e := val.DateTime(nil); e != nil {
+		if t, e := val.DateTime(timezone); e != nil {
 			err = e
 			return
 		} else {
@@ -419,7 +420,7 @@ func parseTodo(comp *ical.Component) (data *compData, err error) {
 		// dtstart was not set yet; assume completed/created handling
 		var created, completed time.Time
 		if val := comp.Props.Get(ical.PropCompleted); val != nil {
-			if t, e := val.DateTime(nil); e != nil {
+			if t, e := val.DateTime(timezone); e != nil {
 				err = e
 				return
 			} else {
@@ -427,7 +428,7 @@ func parseTodo(comp *ical.Component) (data *compData, err error) {
 			}
 		}
 		if val := comp.Props.Get(ical.PropCreated); val != nil {
-			if t, e := val.DateTime(nil); e != nil {
+			if t, e := val.DateTime(timezone); e != nil {
 				err = e
 				return
 			} else {
@@ -489,7 +490,7 @@ func parseTodo(comp *ical.Component) (data *compData, err error) {
 	return
 }
 
-func parseCalendarComponent(comp *ical.Component) (data *compData, err error) {
+func parseCalendarComponent(comp *ical.Component, timezone *time.Location) (data *compData, err error) {
 	err = &webDAVerror{
 		Code:      http.StatusForbidden,
 		Condition: &validCalendarObjectResourceName,
@@ -497,19 +498,19 @@ func parseCalendarComponent(comp *ical.Component) (data *compData, err error) {
 
 	switch comp.Name {
 	case ical.CompEvent:
-		if edt, e := parseEvent(comp); e != nil {
+		if edt, e := parseEvent(comp, timezone); e != nil {
 			return
 		} else {
 			data = edt
 		}
 	case ical.CompJournal:
-		if jdt, e := parseJournal(comp); e != nil {
+		if jdt, e := parseJournal(comp, timezone); e != nil {
 			return
 		} else {
 			data = jdt
 		}
 	case ical.CompToDo:
-		if tdt, e := parseTodo(comp); e != nil {
+		if tdt, e := parseTodo(comp, timezone); e != nil {
 			return
 		} else {
 			data = tdt
@@ -528,7 +529,7 @@ func parseCalendarComponent(comp *ical.Component) (data *compData, err error) {
 	return
 }
 
-func ParseCalendarObjectResource(cal *ical.Calendar) (metadata *CalendarMetaData, err error) {
+func ParseCalendarObjectResource(cal *ical.Calendar, timezone *time.Location) (metadata *CalendarMetaData, err error) {
 	var component_type string
 	err = &webDAVerror{
 		Code:      http.StatusForbidden,
@@ -548,7 +549,7 @@ func ParseCalendarObjectResource(cal *ical.Calendar) (metadata *CalendarMetaData
 		} else if child.Name != component_type {
 			return
 		}
-		if comp, e := parseCalendarComponent(child); e != nil {
+		if comp, e := parseCalendarComponent(child, timezone); e != nil {
 			err = e
 			return
 		} else {

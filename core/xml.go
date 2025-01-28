@@ -7,6 +7,9 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"time"
+
+	"github.com/emersion/go-ical"
 )
 
 // https://datatracker.ietf.org/doc/html/rfc4918#section-14.20
@@ -193,7 +196,7 @@ type calendarHomeSet struct {
 }
 
 // calendar data elements
-type calendarDataReq struct {
+type CalendarDataReq struct {
 	XMLName            xml.Name `xml:"urn:ietf:params:xml:ns:caldav calendar-data"`
 	Expand             *Any     `xml:"urn:ietf:params:xml:ns:caldav expand"`
 	LimitRecurrenceSet *Any     `xml:"urn:ietf:params:xml:ns:caldav limit-recurrence-set"`
@@ -221,7 +224,35 @@ type Query struct {
 	Prop              *Prop              `xml:"DAV: prop"`
 	CalendarFilter    *calendarfilter    `xml:"urn:ietf:params:xml:ns:caldav filter"`
 	AddressbookFilter *addressbookfilter `xml:"urn:ietf:params:xml:ns:carddav filter"`
-	// TODO: timezone
+	Timezone          *Timezone          `xml:"urn:ietf:params:xml:ns:caldav calendar-timezone"`
+	CalendarData      *CalendarDataReq   `xml:"-"`
+}
+
+type Timezone struct {
+	Location *time.Location
+}
+
+func (tz *Timezone) UnmarshalXML(d *xml.Decoder, start xml.StartElement) (err error) {
+	err = fmt.Errorf("invalid timezone data")
+	if t, e := d.Token(); e != nil {
+		//
+	} else if cd, ok := t.(xml.CharData); !ok {
+		//
+	} else if br := bytes.NewReader(cd); false {
+		//
+	} else if tz_cal, e := ical.NewDecoder(br).Decode(); e != nil || len(tz_cal.Children) != 1 {
+		//
+	} else if tz_comp := tz_cal.Children[0]; tz_comp.Name != ical.CompTimezone {
+		//
+	} else if tz_id_prop := tz_comp.Props.Get(ical.PropTimezoneID); tz_id_prop == nil {
+		//
+	} else if loc, e := time.LoadLocation(tz_id_prop.Value); e != nil {
+		err = e
+	} else {
+		tz.Location = loc
+		err = nil
+	}
+	return
 }
 
 // https://datatracker.ietf.org/doc/html/rfc4791#section-9.7
@@ -290,12 +321,13 @@ type timeRange struct {
 
 // https://datatracker.ietf.org/doc/html/rfc4791#section-9.5
 type Multiget struct {
-	XMLName  xml.Name  `xml:""`
-	AllProp  *struct{} `xml:"DAV: allprop"`
-	PropName *struct{} `xml:"DAV: propname"`
-	Prop     *Prop     `xml:"DAV: prop"`
-	Hrefs    []Href    `xml:"DAV: href"`
-	// TODO: timezone
+	XMLName      xml.Name         `xml:""`
+	AllProp      *struct{}        `xml:"DAV: allprop"`
+	PropName     *struct{}        `xml:"DAV: propname"`
+	Prop         *Prop            `xml:"DAV: prop"`
+	Hrefs        []Href           `xml:"DAV: href"`
+	Timezone     *Timezone        `xml:"ietf:params:xml:ns:caldav calendar-timezone"`
+	CalendarData *CalendarDataReq `xml:"-"`
 }
 
 type reportReq struct {
