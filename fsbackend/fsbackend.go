@@ -638,7 +638,6 @@ func (b *FSBackend) queryFile(p string, fi fs.FileInfo, query *core.Query) (resp
 		file = bytes.NewBuffer(f)
 		props_Found = pf
 	}
-
 	switch query.Scope() {
 	case core.CalendarScope:
 		// now check if the file matches the query

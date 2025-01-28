@@ -108,28 +108,6 @@ func (h *Handler) handleMkCol(w http.ResponseWriter, r *http.Request) error {
 	}
 }
 
-// func (h *Handler) handleMkCalendar(w http.ResponseWriter, r *http.Request) error {
-// 	mkcal := &mkCalendarRequest{}
-// 	if isXML, e := isContentXML(r.Header); e != nil {
-// 		return e
-// 	} else if isXML {
-// 		if e := xml.NewDecoder(r.Body).Decode(mkcal); e != nil {
-// 			return &webDAVerror{
-// 				Code: http.StatusBadRequest,
-// 			}
-// 		}
-// 	}
-// 	if resp, e := h.Backend.MkCalendar(r, mkcal.Set); e != nil {
-// 		return e
-// 	} else if v, e := xml.Marshal(&mkCalendarResponse{PropStat: resp}); e != nil {
-// 		return e
-// 	} else {
-// 		w.WriteHeader(http.StatusCreated)
-// 		w.Write(v)
-// 		return nil
-// 	}
-// }
-
 func (h *Handler) handleDelete(w http.ResponseWriter, r *http.Request) error {
 	if e := h.Backend.Delete(r); e != nil {
 		return e
@@ -300,6 +278,8 @@ mux:
 	case "MKCALENDAR", "MKCOL":
 		err = h.handleMkCol(w, r)
 	case "COPY", "MOVE":
+		// copy (or move) does not make sense within a collection
+		// but it does make sense when spanning two different collections
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		w.Write(nil)
 	}

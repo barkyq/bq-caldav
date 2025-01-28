@@ -169,8 +169,6 @@ func (s Scope) supportedReportSet() *Any {
 		return supportedReportSetHelper(calendarQueryName, calendarMultiGetName)
 	case AddressbookScope:
 		return supportedReportSetHelper(addressbookQueryName, addressbookMultiGetName)
-	case CalendarScope | AddressbookScope:
-		return supportedReportSetHelper(calendarQueryName, calendarMultiGetName, addressbookQueryName, addressbookMultiGetName)
 	default:
 		return nil
 	}
@@ -515,6 +513,7 @@ func partialRetrieval(source *ical.Component, compReq *compReq) (partial *ical.C
 	case ical.CompAlarm:
 		required = []string{ical.PropAction, ical.PropTrigger, ical.PropDescription, ical.PropSummary}
 	}
+
 	for _, requiredp := range required {
 		if p := source.Props.Get(requiredp); p != nil {
 			if t, e := p.DateTime(nil); e != nil {
@@ -526,38 +525,23 @@ func partialRetrieval(source *ical.Component, compReq *compReq) (partial *ical.C
 	}
 
 	for _, p := range compReq.Props {
-		var name string
-		var novalue bool
-		for _, a := range p.Attr {
-			if a.Name.Local == "name" {
-				name = a.Value
-			} else if a.Name.Local == "novalue" {
-				if a.Value == "yes" {
-					novalue = true
-				}
-			}
-		}
-		if name == "" {
-			return nil, &webDAVerror{
-				Code: http.StatusBadRequest,
-			}
-		}
 		for _, r := range required {
-			if name == r {
+			if p.Name == r {
 				// already added required properties
 				continue
 			}
 		}
-		for _, a := range source.Props.Values(name) {
-			if novalue {
-				partial.Props.Add(&ical.Prop{Name: name})
+		for _, a := range source.Props.Values(p.Name) {
+			if p.NoValue {
+				partial.Props.Add(&ical.Prop{Name: p.Name})
 			} else if t, e := a.DateTime(nil); e != nil {
 				partial.Props.Add(&a)
 			} else {
-				partial.Props.SetDateTime(name, t.In(time.UTC))
+				partial.Props.SetDateTime(p.Name, t.In(time.UTC))
 			}
 		}
 	}
+
 	for _, c := range compReq.Comps {
 		for _, source_child := range source.Children {
 			if source_child.Name == c.Name {
@@ -569,7 +553,104 @@ func partialRetrieval(source *ical.Component, compReq *compReq) (partial *ical.C
 			}
 		}
 	}
+
 	return partial, nil
+}
+
+func (cd *CalendarDataReq) checkCalendarDataReq() (err error) {
+	err = &webDAVerror{
+		Code: http.StatusBadRequest,
+	}
+	if cd.Expand != nil && cd.LimitRecurrenceSet != nil {
+		return
+	} else if cd.CompReq == nil {
+		// do nothing
+	} else if e := cd.CompReq.checkCompReq(); e != nil {
+		return
+	} else if cd.CompReq.Name != ical.CompCalendar {
+		return
+	} else if e := checkPropReqRepetitions(cd.CompReq.Props); e != nil {
+		return
+	} else {
+		var event_seen, todo_seen, journal_seen, timezone_seen bool
+		for _, cr := range cd.CompReq.Comps {
+			if e := cr.checkCompReq(); e != nil {
+				return
+			}
+			switch cr.Name {
+			case ical.CompEvent:
+				if event_seen {
+					return
+				}
+				event_seen = true
+			case ical.CompToDo:
+				if todo_seen {
+					return
+				}
+				todo_seen = true
+			case ical.CompJournal:
+				if journal_seen {
+					return
+				}
+				journal_seen = true
+			case ical.CompTimezone:
+				if timezone_seen {
+					return
+				}
+				timezone_seen = true
+			}
+		}
+	}
+	err = nil
+	return
+}
+
+func (c *compReq) checkCompReq() (err error) {
+	err = fmt.Errorf("bad comp req")
+	if c.Allprop != nil && c.Props != nil {
+		return
+	} else if c.Allcomp != nil && c.Comps != nil {
+		return
+	}
+	if c.Props != nil {
+		if e := checkPropReqRepetitions(c.Props); e != nil {
+			return
+		}
+	}
+	switch c.Name {
+	case ical.CompJournal, ical.CompTimezone, ical.CompAlarm:
+		if c.Comps != nil {
+			return
+		}
+	case ical.CompEvent, ical.CompToDo:
+		if c.Comps != nil {
+			if len(c.Comps) != 1 {
+				return
+			} else if cr := c.Comps[0]; cr.Name != ical.CompAlarm {
+				return
+			} else if e := cr.checkCompReq(); e != nil {
+				return
+			}
+		}
+	}
+	err = nil
+	return
+}
+
+func checkPropReqRepetitions(props []propReq) (err error) {
+	err = fmt.Errorf("bad prop req")
+	seen := make([]string, 0, len(props))
+	for _, p := range props {
+		for _, s := range seen {
+			if p.Name == s {
+				// cannot have repeated props
+				return
+			}
+		}
+		seen = append(seen, p.Name)
+	}
+	err = nil
+	return
 }
 
 func (query *Query) ParseCalendarData() error {
@@ -583,7 +664,6 @@ func (query *Query) ParseCalendarData() error {
 			break
 		}
 	}
-
 	if cdata == nil {
 		return nil
 	}
@@ -596,6 +676,8 @@ func (query *Query) ParseCalendarData() error {
 			return &webDAVerror{
 				Code: http.StatusInternalServerError,
 			}
+		} else if e := cd.checkCalendarDataReq(); e != nil {
+			return e
 		} else {
 			query.CalendarData = cd
 		}
@@ -771,7 +853,6 @@ func PropPatchHelper(scope Scope, current_prop *Prop, property_update *PropertyU
 outer1:
 	for _, val := range current_prop.Props {
 		for _, remove := range remove_props {
-			// todo: do not allow removal of protected props
 			if val.XMLName != remove.XMLName {
 				continue
 			} else if isProtected(scope, remove.XMLName) {
@@ -1307,7 +1388,8 @@ func CheckMkColReq(scope Scope, prop_req []Prop) (resp []PropStat, prop_write Pr
 		})
 		return
 	}
-	// todo: remove this once all components are supported
+	// todo: remove this once all components are supported;
+	// currently missing only freebusy, timezone, (and alarm)
 	if scope == CalendarScope {
 		for _, w := range write_props {
 			if w.XMLName == supportedCalendarComponentSetName {

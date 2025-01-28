@@ -209,8 +209,28 @@ type compReq struct {
 	Name    string    `xml:"name,attr"`
 	Allprop *struct{} `xml:"urn:ietf:params:xml:ns:caldav allprop"`
 	Allcomp *struct{} `xml:"urn:ietf:params:xml:ns:caldav allcomp"`
-	Props   []Any     `xml:"urn:ietf:params:xml:ns:caldav prop"`
+	Props   []propReq `xml:"urn:ietf:params:xml:ns:caldav prop"`
 	Comps   []compReq `xml:"urn:ietf:params:xml:ns:caldav comp"`
+}
+
+type propReq struct {
+	Name    string
+	NoValue bool
+}
+
+func (pr *propReq) UnmarshalXML(d *xml.Decoder, start xml.StartElement) (err error) {
+	err = fmt.Errorf("invalid prop req")
+	for _, a := range start.Attr {
+		if a.Name.Local == "name" {
+			pr.Name = a.Value
+			err = nil
+		} else if a.Name.Local == "novalue" {
+			if a.Value == "yes" {
+				pr.NoValue = true
+			}
+		}
+	}
+	return d.Skip()
 }
 
 // Calendar Report Elements
