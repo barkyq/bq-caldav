@@ -478,10 +478,7 @@ func expandCalendar(source *ical.Calendar, expand *timeInterval, location *time.
 			}
 		}
 		if master == nil {
-			for _, c := range rescheds {
-				expanded.Children = append(expanded.Children, c.comp)
-			}
-			// TODO: rescheds could themselves be recurring with thisandfuture
+			err = fmt.Errorf("nil master; not allowed!")
 			return
 		}
 		master.comp.Props.Del(ical.PropRecurrenceRule)

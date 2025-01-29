@@ -524,16 +524,31 @@ func ParseCalendarObjectResource(cal *ical.Calendar, timezone *time.Location) (m
 		}
 	}
 
-	// check for recurrence-id
+	// only allow one master
 	var has_master bool
 	for _, c := range comps {
+		// opinionated; reschedulings cannot themselves be recurring
 		if c.recurrenceid.IsZero() {
 			if has_master {
 				return
 			} else {
 				has_master = true
 			}
+		} else if val := c.comp.Props.Get(ical.PropRecurrenceRule); val != nil {
+			return
+		} else if val := c.comp.Props.Get(ical.PropRecurrenceDates); val != nil {
+			return
+		} else if val := c.comp.Props.Get(ical.PropExceptionDates); val != nil {
+			return
+		} else if val := c.comp.Props.Get(ical.PropRecurrenceID); val == nil {
+			return
+		} else if param := val.Params.Get("RANGE"); param == "THISANDFUTURE" {
+			return
 		}
+	}
+	if !has_master {
+		// opinionated: need a master
+		return
 	}
 
 	metadata = &CalendarMetaData{component_type, comps}
