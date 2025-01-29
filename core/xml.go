@@ -168,6 +168,7 @@ var (
 	supportedCalendarComponentName  = xml.Name{Space: "urn:ietf:params:xml:ns:caldav", Local: "supported-calendar-component"}
 	calendarNoUIDConflictName       = xml.Name{Space: "urn:ietf:params:xml:ns:caldav", Local: "no-uid-conflict"}
 	supportedFilterName             = xml.Name{Space: "urn:ietf:params:xml:ns:caldav", Local: "supported-filter"}
+	validFilterName                 = xml.Name{Space: "urn:ietf:params:xml:ns:caldav", Local: "valid-filter"}
 
 	addressbookNoUIDConflictName = xml.Name{Space: "urn:ietf:params:xml:ns:carddav", Local: "no-uid-conflict"}
 	validAddressDataName         = xml.Name{Space: "urn:ietf:params:xml:ns:carddav", Local: "valid-address-data"}
@@ -355,10 +356,30 @@ type paramFilter struct {
 
 // https://datatracker.ietf.org/doc/html/rfc4791#section-9.7.5
 type textMatch struct {
-	XMLName         xml.Name `xml:""`
-	Text            string   `xml:",chardata"`
-	Collation       string   `xml:"collation,attr"`
-	NegateCondition string   `xml:"negate-condition,attr"`
+	Text            string
+	NegateCondition bool `xml:"negate-condition,attr"`
+}
+
+func (tm *textMatch) UnmarshalXML(d *xml.Decoder, start xml.StartElement) (err error) {
+	err = &webDAVerror{
+		Code: http.StatusBadRequest,
+	}
+	for _, a := range start.Attr {
+		if a.Name.Local == "negate-condition" {
+			if a.Value == "yes" {
+				tm.NegateCondition = true
+			}
+		}
+	}
+	for {
+		if t, e := d.Token(); errors.Is(e, io.EOF) {
+			return nil
+		} else if e != nil {
+			return e
+		} else if text, ok := t.(xml.CharData); ok {
+			tm.Text = fmt.Sprintf("%s", bytes.ToLower(text))
+		}
+	}
 }
 
 // https://datatracker.ietf.org/doc/html/rfc4791#section-9.5

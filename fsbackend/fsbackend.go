@@ -551,6 +551,9 @@ func (b *FSBackend) Query(r *http.Request, query *core.Query, depth byte) (ms *c
 		if query_scope != core.CalendarScope {
 			err = core.WebDAVerror(http.StatusBadRequest, nil)
 			return
+		} else if e := core.CheckCalendarQueryFilterIsValid(query); e != nil {
+			err = e
+			return
 		} else if query.Timezone == nil {
 			// need to get timezone
 			err = core.WebDAVerror(http.StatusMethodNotAllowed, nil)
