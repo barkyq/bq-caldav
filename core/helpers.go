@@ -368,31 +368,11 @@ func matchCompFilterWithComp(cf compFilter, comp *ical.Component, location *time
 
 	switch {
 	case cf.TimeRange != nil:
-		var start_time, end_time time.Time
 		if comp.Name != ical.CompEvent && comp.Name != ical.CompToDo && comp.Name != ical.CompJournal {
 			return false, err
-		}
-		if cf.TimeRange.Start != "" {
-			if t, e := time.Parse(dateWithUTCTimeFormat, cf.TimeRange.Start); e != nil {
-				return false, &webDAVerror{
-					Code: http.StatusBadRequest,
-				}
-			} else {
-				start_time = t
-			}
-		}
-		if cf.TimeRange.End != "" {
-			if t, e := time.Parse(dateWithUTCTimeFormat, cf.TimeRange.End); e != nil {
-				return false, &webDAVerror{
-					Code: http.StatusBadRequest,
-				}
-			} else {
-				end_time = t
-			}
-		}
-		if data, e := parseCalendarComponent(comp, location); e != nil {
+		} else if data, e := parseCalendarComponent(comp, location); e != nil {
 			return false, e
-		} else if data.Intersect(start_time, end_time) {
+		} else if data.Intersect(cf.TimeRange.start, cf.TimeRange.end) {
 			return true, nil
 		} else {
 			return false, nil
@@ -480,12 +460,16 @@ func IfMatchifNoneMatch(etag string, ifmatch string, ifnonematch string) (err er
 	return
 }
 
-func expandCalendar(source *ical.Calendar, expand *Any) (expanded *ical.Calendar, err error) {
+func expandCalendar(source *ical.Calendar, expand *timeInterval, location *time.Location) (expanded *ical.Calendar, err error) {
+	if _, e := ParseCalendarObjectResource(source, location); e != nil {
+		err = e
+		return
+	}
 	expanded = source
 	return
 }
 
-func limitRecurrenceSet(source *ical.Calendar, limit_recurrence_set *Any) (limited *ical.Calendar, err error) {
+func limitRecurrenceSet(source *ical.Calendar, limit_recurrence_set *timeInterval, location *time.Location) (limited *ical.Calendar, err error) {
 	limited = source
 	return
 }
@@ -516,11 +500,7 @@ func partialRetrieval(source *ical.Component, compReq *compReq) (partial *ical.C
 
 	for _, requiredp := range required {
 		if p := source.Props.Get(requiredp); p != nil {
-			if t, e := p.DateTime(nil); e != nil {
-				partial.Props.Add(p)
-			} else {
-				partial.Props.SetDateTime(requiredp, t.In(time.UTC))
-			}
+			partial.Props.Add(p)
 		}
 	}
 
@@ -534,10 +514,8 @@ func partialRetrieval(source *ical.Component, compReq *compReq) (partial *ical.C
 		for _, a := range source.Props.Values(p.Name) {
 			if p.NoValue {
 				partial.Props.Add(&ical.Prop{Name: p.Name})
-			} else if t, e := a.DateTime(nil); e != nil {
-				partial.Props.Add(&a)
 			} else {
-				partial.Props.SetDateTime(p.Name, t.In(time.UTC))
+				partial.Props.Add(&a)
 			}
 		}
 	}
@@ -559,12 +537,19 @@ func partialRetrieval(source *ical.Component, compReq *compReq) (partial *ical.C
 
 func (cd *CalendarDataReq) checkCalendarDataReq() (err error) {
 	err = &webDAVerror{
-		Code: http.StatusBadRequest,
+		Code:      http.StatusBadRequest,
+		Condition: &validCalendarDataName,
 	}
 	if cd.Expand != nil && cd.LimitRecurrenceSet != nil {
 		return
+	} else if exp := cd.Expand; exp != nil && (exp.start.IsZero() || !exp.end.After(exp.start)) {
+		return
+	} else if lrs := cd.LimitRecurrenceSet; lrs != nil && (lrs.start.IsZero() || !lrs.end.After(lrs.start)) {
+		return
+	} else if lfbs := cd.LimitFreeBusySet; lfbs != nil && (lfbs.start.IsZero() || !lfbs.end.After(lfbs.start)) {
+		return
 	} else if cd.CompReq == nil {
-		// do nothing
+		// nothing else to check
 	} else if e := cd.CompReq.checkCompReq(); e != nil {
 		return
 	} else if cd.CompReq.Name != ical.CompCalendar {
@@ -611,8 +596,7 @@ func (c *compReq) checkCompReq() (err error) {
 		return
 	} else if c.Allcomp != nil && c.Comps != nil {
 		return
-	}
-	if c.Props != nil {
+	} else if c.Props != nil {
 		if e := checkPropReqRepetitions(c.Props); e != nil {
 			return
 		}
@@ -653,48 +637,36 @@ func checkPropReqRepetitions(props []propReq) (err error) {
 	return
 }
 
-func (query *Query) ParseCalendarData() error {
-	var cdata *Any
-	if query.Prop == nil {
-		return nil
-	}
-	for _, val := range query.Prop.Props {
-		if val.XMLName == calendarDataName {
-			cdata = &val
-			break
-		}
-	}
-	if cdata == nil {
-		return nil
-	}
-	if cdata.Content != nil {
+func ParseCalendarData(request HasCalendarDataProp) (*CalendarDataReq, error) {
+	if cdata := request.getCalendarData(); cdata == nil {
+		return nil, nil
+	} else if cdata.Content != nil {
 		buf := bytes.NewBufferString("<calendar-data xmlns=\"urn:ietf:params:xml:ns:caldav\">")
 		buf.Write(cdata.Content)
 		buf.WriteString("</calendar-data>")
 		cd := &CalendarDataReq{}
 		if e := xml.NewDecoder(buf).Decode(cd); e != nil {
-			return &webDAVerror{
+			return nil, &webDAVerror{
 				Code: http.StatusInternalServerError,
 			}
 		} else if e := cd.checkCalendarDataReq(); e != nil {
-			return e
+			return nil, e
 		} else {
-			query.CalendarData = cd
+			return cd, nil
 		}
 	} else {
-		query.CalendarData = &CalendarDataReq{}
+		return &CalendarDataReq{}, nil
 	}
-	return nil
 }
 
-func CalendarData(cal *ical.Calendar, cd *CalendarDataReq) (*Any, error) {
+func CalendarData(cal *ical.Calendar, cd *CalendarDataReq, location *time.Location) (*Any, error) {
 	if cd == nil {
 		return nil, nil
 	}
 
 	if cd.Expand == nil {
 		// do nothing
-	} else if c, e := expandCalendar(cal, cd.Expand); e != nil {
+	} else if c, e := expandCalendar(cal, cd.Expand, location); e != nil {
 		return nil, e
 	} else {
 		cal = c
@@ -702,7 +674,7 @@ func CalendarData(cal *ical.Calendar, cd *CalendarDataReq) (*Any, error) {
 
 	if cd.LimitRecurrenceSet == nil {
 		// do nothing
-	} else if c, e := limitRecurrenceSet(cal, cd.LimitRecurrenceSet); e != nil {
+	} else if c, e := limitRecurrenceSet(cal, cd.LimitRecurrenceSet, location); e != nil {
 		return nil, e
 	} else {
 		cal = c

@@ -21,8 +21,6 @@ type compData struct {
 	rset         *rrule.Set
 	recurrenceid time.Time
 	attendees    uint64
-	summary      string
-	description  string
 	comp         *ical.Component
 }
 
@@ -174,19 +172,19 @@ func parseJournal(comp *ical.Component, timezone *time.Location) (data *compData
 		}
 	}
 
-	repl := strings.NewReplacer("\\n", "\n", "\\,", ",", "\\;", ";", "\\\\", "\\")
-	// get summary
-	if p := comp.Props.Get(ical.PropSummary); p != nil {
-		data.summary = repl.Replace(p.Value)
-	}
+	// repl := strings.NewReplacer("\\n", "\n", "\\,", ",", "\\;", ";", "\\\\", "\\")
+	// // get summary
+	// if p := comp.Props.Get(ical.PropSummary); p != nil {
+	// 	data.summary = repl.Replace(p.Value)
+	// }
 
-	// get descriptions
-	descriptions := comp.Props.Values(ical.PropDescription)
-	b := bytes.NewBuffer(nil)
-	for _, v := range descriptions {
-		b.WriteString(repl.Replace(v.Value))
-	}
-	data.description = b.String()
+	// // get descriptions
+	// descriptions := comp.Props.Values(ical.PropDescription)
+	// b := bytes.NewBuffer(nil)
+	// for _, v := range descriptions {
+	// 	b.WriteString(repl.Replace(v.Value))
+	// }
+	// data.description = b.String()
 	data.comp = comp
 	return
 }
@@ -307,16 +305,6 @@ func parseEvent(comp *ical.Component, timezone *time.Location) (data *compData, 
 		data.rset = r
 	}
 
-	repl := strings.NewReplacer("\\n", "\n", "\\,", ",", "\\;", ";", "\\\\", "\\")
-	// get summary
-	if p := comp.Props.Get(ical.PropSummary); p != nil {
-		data.summary = repl.Replace(p.Value)
-	}
-	// get description
-	if p := comp.Props.Get(ical.PropDescription); p != nil {
-		data.description = repl.Replace(p.Value)
-	}
-	data.comp = comp
 	err = nil
 	return
 }
@@ -473,16 +461,6 @@ func parseTodo(comp *ical.Component, timezone *time.Location) (data *compData, e
 		} else {
 			data.recurrenceid = t
 		}
-	}
-
-	repl := strings.NewReplacer("\\n", "\n", "\\,", ",", "\\;", ";", "\\\\", "\\")
-	// get summary
-	if p := comp.Props.Get(ical.PropSummary); p != nil {
-		data.summary = repl.Replace(p.Value)
-	}
-	// get description
-	if p := comp.Props.Get(ical.PropDescription); p != nil {
-		data.description = repl.Replace(p.Value)
 	}
 
 	data.comp = comp

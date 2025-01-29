@@ -575,9 +575,11 @@ func (b *FSBackend) Query(r *http.Request, query *core.Query, depth byte) (ms *c
 				query.Timezone = &core.Timezone{Location: loc}
 			}
 		}
-		if e := query.ParseCalendarData(); e != nil {
+		if cd, e := core.ParseCalendarData(query); e != nil {
 			err = e
 			return
+		} else {
+			query.CalendarData = cd
 		}
 	case core.AddressbookScope:
 		if query_scope != core.AddressbookScope {
@@ -651,7 +653,7 @@ func (b *FSBackend) queryFile(p string, fi fs.FileInfo, query *core.Query) (resp
 		} else if !m {
 			// did not match
 			return
-		} else if a, e := core.CalendarData(cal, query.CalendarData); e != nil {
+		} else if a, e := core.CalendarData(cal, query.CalendarData, query.Timezone.Location); e != nil {
 			// internal server error or webdav not-implemented
 			err = e
 			return
@@ -688,20 +690,6 @@ func (b *FSBackend) queryFile(p string, fi fs.FileInfo, query *core.Query) (resp
 
 // REPORT calendar-multiget
 func (b *FSBackend) Multiget(r *http.Request, multiget *core.Multiget) (ms *core.MultiStatus, err error) {
-	scope := multiget.Scope()
-	switch getScope(r.URL.Path) {
-	case core.CalendarScope:
-		if scope != core.CalendarScope {
-			err = core.WebDAVerror(http.StatusBadRequest, nil)
-			return
-		}
-	case core.AddressbookScope:
-		if scope != core.AddressbookScope {
-			err = core.WebDAVerror(http.StatusBadRequest, nil)
-			return
-		}
-	}
-
 	b.lock.Lock()
 	defer b.lock.Unlock()
 
@@ -709,6 +697,52 @@ func (b *FSBackend) Multiget(r *http.Request, multiget *core.Multiget) (ms *core
 	if p == "" {
 		p = "."
 	}
+
+	scope := multiget.Scope()
+	switch getScope(r.URL.Path) {
+	case core.CalendarScope:
+		if scope != core.CalendarScope {
+			err = core.WebDAVerror(http.StatusBadRequest, nil)
+			return
+		}
+		if multiget.Timezone == nil {
+			// need to get timezone
+			err = core.WebDAVerror(http.StatusMethodNotAllowed, nil)
+			var propsdotxmlpath string
+			if d := len(strings.Split(p, "/")); d == 2 {
+				propsdotxmlpath = path.Join(p, "props.xml")
+			} else if d == 3 {
+				propsdotxmlpath = path.Join(path.Dir(p), "props.xml")
+			} else {
+				return
+			}
+			err = core.WebDAVerror(http.StatusInternalServerError, nil)
+			collection_prop := &core.Prop{}
+			if pf, e := b.fsys.Open(propsdotxmlpath); e != nil {
+				return
+			} else if e := xml.NewDecoder(pf).Decode(collection_prop); e != nil {
+				return
+			} else if loc, e := core.GetLocationFromProp(collection_prop); e != nil {
+				return
+			} else {
+				err = nil
+				multiget.Timezone = &core.Timezone{Location: loc}
+			}
+		}
+		if cd, e := core.ParseCalendarData(multiget); e != nil {
+			err = e
+			return
+		} else {
+			multiget.CalendarData = cd
+		}
+
+	case core.AddressbookScope:
+		if scope != core.AddressbookScope {
+			err = core.WebDAVerror(http.StatusBadRequest, nil)
+			return
+		}
+	}
+
 	var resps []core.Response
 
 	if fi, e := fs.Stat(b.fsys, p); e != nil {
@@ -764,7 +798,7 @@ jump:
 		// now write calendar-data
 		if cal, e := ical.NewDecoder(file).Decode(); e != nil {
 			return
-		} else if a, e := core.CalendarData(cal, multiget.CalendarData); e != nil {
+		} else if a, e := core.CalendarData(cal, multiget.CalendarData, multiget.Timezone.Location); e != nil {
 			return
 		} else if a != nil {
 			props_Found = append(props_Found, *a)

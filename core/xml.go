@@ -197,11 +197,38 @@ type calendarHomeSet struct {
 
 // calendar data elements
 type CalendarDataReq struct {
-	XMLName            xml.Name `xml:"urn:ietf:params:xml:ns:caldav calendar-data"`
-	Expand             *Any     `xml:"urn:ietf:params:xml:ns:caldav expand"`
-	LimitRecurrenceSet *Any     `xml:"urn:ietf:params:xml:ns:caldav limit-recurrence-set"`
-	LimitFreeBusySet   *Any     `xml:"urn:ietf:params:xml:ns:caldav limit-freebusy-set"`
-	CompReq            *compReq `xml:"urn:ietf:params:xml:ns:caldav comp"`
+	XMLName            xml.Name      `xml:"urn:ietf:params:xml:ns:caldav calendar-data"`
+	Expand             *timeInterval `xml:"urn:ietf:params:xml:ns:caldav expand"`
+	LimitRecurrenceSet *timeInterval `xml:"urn:ietf:params:xml:ns:caldav limit-recurrence-set"`
+	LimitFreeBusySet   *timeInterval `xml:"urn:ietf:params:xml:ns:caldav limit-freebusy-set"`
+	CompReq            *compReq      `xml:"urn:ietf:params:xml:ns:caldav comp"`
+}
+
+type timeInterval struct {
+	start time.Time
+	end   time.Time
+}
+
+func (ti *timeInterval) UnmarshalXML(d *xml.Decoder, start xml.StartElement) (err error) {
+	err = &webDAVerror{
+		Code: http.StatusBadRequest,
+	}
+	for _, a := range start.Attr {
+		if a.Name.Local == "start" {
+			if t, e := time.Parse(dateWithUTCTimeFormat, a.Value); e != nil {
+				return
+			} else {
+				ti.start = t
+			}
+		} else if a.Name.Local == "end" {
+			if t, e := time.Parse(dateWithUTCTimeFormat, a.Value); e != nil {
+				return
+			} else {
+				ti.end = t
+			}
+		}
+	}
+	return d.Skip()
 }
 
 type compReq struct {
@@ -219,18 +246,20 @@ type propReq struct {
 }
 
 func (pr *propReq) UnmarshalXML(d *xml.Decoder, start xml.StartElement) (err error) {
-	err = fmt.Errorf("invalid prop req")
 	for _, a := range start.Attr {
 		if a.Name.Local == "name" {
 			pr.Name = a.Value
-			err = nil
 		} else if a.Name.Local == "novalue" {
 			if a.Value == "yes" {
 				pr.NoValue = true
 			}
 		}
 	}
-	return d.Skip()
+	if pr.Name == "" {
+		return fmt.Errorf("name is required")
+	} else {
+		return d.Skip()
+	}
 }
 
 // Calendar Report Elements
@@ -292,7 +321,7 @@ type compFilter struct {
 	XMLName      xml.Name             `xml:"urn:ietf:params:xml:ns:caldav comp-filter"`
 	Name         string               `xml:"name,attr"`
 	IsNotDefined *struct{}            `xml:"is-not-defined"`
-	TimeRange    *timeRange           `xml:"time-range"`
+	TimeRange    *timeInterval        `xml:"time-range"`
 	PropFilters  []calendarPropFilter `xml:"prop-filter"`
 	CompFilters  []compFilter         `xml:"comp-filter"`
 }
@@ -302,7 +331,7 @@ type calendarPropFilter struct {
 	XMLName      xml.Name      `xml:"urn:ietf:params:xml:ns:caldav prop-filter"`
 	Name         string        `xml:"name,attr"`
 	IsNotDefined *struct{}     `xml:"is-not-defined"`
-	TimeRange    *timeRange    `xml:"time-range"`
+	TimeRange    *timeInterval `xml:"time-range"`
 	TextMatch    *textMatch    `xml:"text-match"`
 	ParamFilter  []paramFilter `xml:"param-filter"`
 }
@@ -332,13 +361,6 @@ type textMatch struct {
 	NegateCondition string   `xml:"negate-condition,attr"`
 }
 
-// https://datatracker.ietf.org/doc/html/rfc4791#section-9.9
-type timeRange struct {
-	XMLName xml.Name `xml:"urn:ietf:params:xml:ns:caldav time-range"`
-	Start   string   `xml:"start,attr"`
-	End     string   `xml:"end,attr"`
-}
-
 // https://datatracker.ietf.org/doc/html/rfc4791#section-9.5
 type Multiget struct {
 	XMLName      xml.Name         `xml:""`
@@ -353,6 +375,36 @@ type Multiget struct {
 type reportReq struct {
 	Query    *Query
 	Multiget *Multiget
+}
+
+type HasCalendarDataProp interface {
+	getCalendarData() (cdata *Any)
+}
+
+func (m *Multiget) getCalendarData() (cdata *Any) {
+	if m.Prop == nil {
+		return nil
+	}
+	for _, val := range m.Prop.Props {
+		if val.XMLName == calendarDataName {
+			cdata = &val
+			break
+		}
+	}
+	return
+}
+
+func (q *Query) getCalendarData() (cdata *Any) {
+	if q.Prop == nil {
+		return nil
+	}
+	for _, val := range q.Prop.Props {
+		if val.XMLName == calendarDataName {
+			cdata = &val
+			break
+		}
+	}
+	return
 }
 
 func (r *reportReq) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
