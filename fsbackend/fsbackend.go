@@ -652,6 +652,7 @@ func (b *FSBackend) queryFile(p string, fi fs.FileInfo, query *core.Query) (resp
 			return
 		} else if !m {
 			// did not match
+			err = &notFound{}
 			return
 		} else if a, e := core.CalendarData(cal, query.CalendarData, query.Timezone.Location); e != nil {
 			// internal server error or webdav not-implemented
@@ -797,16 +798,21 @@ jump:
 	case core.CalendarScope:
 		// now write calendar-data
 		if cal, e := ical.NewDecoder(file).Decode(); e != nil {
+			err = &notFound{}
 			return
 		} else if a, e := core.CalendarData(cal, multiget.CalendarData, multiget.Timezone.Location); e != nil {
+			err = e
 			return
 		} else if a != nil {
 			props_Found = append(props_Found, *a)
 		}
 	case core.AddressbookScope:
 		if card, e := vcard.NewDecoder(file).Decode(); e != nil {
+			err = &notFound{}
 			return
 		} else if a, e := core.AddressData(card, multiget.Prop); e != nil {
+			// todo: handle this better
+			err = &notFound{}
 			return
 		} else if a != nil {
 			props_Found = append(props_Found, *a)

@@ -1,7 +1,6 @@
 package core
 
 import (
-	"bytes"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -19,7 +18,7 @@ type compData struct {
 	duration     time.Duration
 	start_name   string
 	end_name     string
-	rset         *rrule.Set
+	rrule        *rrule.RRule
 	recurrenceid time.Time
 	attendees    uint64
 	comp         *ical.Component
@@ -75,12 +74,12 @@ func intersect_helper(min time.Time, max time.Time, start time.Time, duration ti
 	return false
 }
 
-func rrule_count_instances(rset *rrule.Set, max_number_of_instances uint64) bool {
-	if rset == nil {
+func rrule_count_instances(rrule *rrule.RRule, max_number_of_instances uint64) bool {
+	if rrule == nil {
 		return true
 	} else {
 		count := uint64(0)
-		next := rset.Iterator()
+		next := rrule.Iterator()
 		for {
 			if _, ok := next(); !ok {
 				return true
@@ -94,8 +93,10 @@ func rrule_count_instances(rset *rrule.Set, max_number_of_instances uint64) bool
 	}
 }
 
-func rrule_intersect_helper(min time.Time, max time.Time, rset *rrule.Set, duration time.Duration) bool {
-	if t := rset.After(min.Add(-duration), false); !t.IsZero() {
+func rrule_intersect_helper(min time.Time, max time.Time, rrule *rrule.RRule, duration time.Duration) bool {
+	if min.IsZero() || rrule == nil {
+		return false
+	} else if t := rrule.After(min.Add(-duration), false); !t.IsZero() {
 		if max.IsZero() && t.Add(duration).After(min) || t.Equal(min) && duration == 0 {
 			return true
 		}
@@ -112,11 +113,7 @@ func (data *compData) Intersect(min time.Time, max time.Time) (ok bool) {
 		return true
 	}
 	// now try recurrence; safe for unbounded RRULE
-	if min.IsZero() || data.rset == nil {
-		return false
-	}
-
-	return rrule_intersect_helper(min, max, data.rset, data.duration)
+	return rrule_intersect_helper(min, max, data.rrule, data.duration)
 }
 
 func parseDuration(val string) (dur time.Duration, err error) {
@@ -151,6 +148,17 @@ func parseJournal(comp *ical.Component, timezone *time.Location) (data *compData
 		data.uid = val.Value
 	} else {
 		err = fmt.Errorf("parse error")
+		return
+	}
+
+	// Journals cannot be recurring
+	if val := comp.Props.Get(ical.PropRecurrenceRule); val != nil {
+		return
+	} else if val := comp.Props.Get(ical.PropRecurrenceDates); val != nil {
+		return
+	} else if val := comp.Props.Get(ical.PropExceptionDates); val != nil {
+		return
+	} else if val := comp.Props.Get(ical.PropRecurrenceID); val != nil {
 		return
 	}
 
@@ -202,8 +210,6 @@ func parseEvent(comp *ical.Component, timezone *time.Location) (data *compData, 
 		return
 	}
 
-	rrule_buf := bytes.NewBuffer(nil)
-
 	if val := comp.Props.Get(ical.PropDateTimeStart); val != nil {
 		if t, e := val.DateTime(timezone); e != nil {
 			err = e
@@ -212,8 +218,6 @@ func parseEvent(comp *ical.Component, timezone *time.Location) (data *compData, 
 			data.dtstart = t
 			data.start_name = ical.PropDateTimeStart
 		}
-
-		rrule_buf.WriteString(fmt.Sprintf("%s:%s\n", val.Name, data.dtstart.In(time.UTC).Format(dateWithUTCTimeFormat)))
 	} else {
 		// need DTSTART
 		return
@@ -254,49 +258,29 @@ func parseEvent(comp *ical.Component, timezone *time.Location) (data *compData, 
 			data.recurrenceid = t
 		}
 	}
+
 	// recurrence rule
-	if val := comp.Props.Get(ical.PropRecurrenceRule); val != nil {
-		rrule_buf.WriteString(fmt.Sprintf("%s:%s\n", val.Name, val.Value))
-	}
-
 	if val := comp.Props.Get(ical.PropRecurrenceDates); val != nil {
-		rrule_buf.WriteString(fmt.Sprintf("%s", val.Name))
-		switch val.ValueType() {
-		case ical.ValueDate:
-			rrule_buf.WriteString(fmt.Sprintf(";VALUE=DATE:%s\n", val.Value))
-		case ical.ValueDateTime:
-			if tzid := val.Params.Get(ical.ParamTimezoneID); tzid != "" {
-				rrule_buf.WriteString(fmt.Sprintf(";TZID=%s", tzid))
-			}
-			rrule_buf.WriteString(fmt.Sprintf(":%s\n", val.Value))
-		case ical.ValuePeriod:
-			// do not allow VALUE=PERIOD
-			return
-		default:
-			// not allowed by RFC
-			return
-		}
-	}
-	if val := comp.Props.Get(ical.PropExceptionDates); val != nil {
-		rrule_buf.WriteString(fmt.Sprintf("%s", val.Name))
-		switch val.ValueType() {
-		case ical.ValueDate:
-			rrule_buf.WriteString(fmt.Sprintf(";VALUE=DATE:%s\n", val.Value))
-		case ical.ValueDateTime:
-			if tzid := val.Params.Get(ical.ParamTimezoneID); tzid != "" {
-				rrule_buf.WriteString(fmt.Sprintf(";TZID=%s", tzid))
-			}
-			rrule_buf.WriteString(fmt.Sprintf(":%s\n", val.Value))
-		default:
-			// not allowed by RFC
-			return
-		}
+		// do not allow; android calendar cannot parse these events
+		return
 	}
 
-	if r, e := rrule.StrToRRuleSet(rrule_buf.String()); e != nil {
+	if val := comp.Props.Get(ical.PropExceptionDates); val != nil {
+		// do not allow; android calendar cannot parse these events
 		return
-	} else {
-		data.rset = r
+	}
+
+	if val := comp.Props.Get(ical.PropRecurrenceRule); val != nil {
+		if r, e := rrule.StrToRRule(fmt.Sprintf("%s:%s\n%s:%s",
+			"DTSTART",
+			data.dtstart.In(time.UTC).Format(dateWithUTCTimeFormat),
+			"RRULE",
+			val.Value,
+		)); e != nil {
+			return
+		} else {
+			data.rrule = r
+		}
 	}
 
 	data.comp = comp
@@ -314,8 +298,6 @@ func parseTodo(comp *ical.Component, timezone *time.Location) (data *compData, e
 	} else {
 		return
 	}
-
-	rrule_buf := bytes.NewBuffer(nil)
 
 	if val := comp.Props.Get(ical.PropDateTimeStart); val != nil {
 		if t, e := val.DateTime(timezone); e != nil {
@@ -358,50 +340,23 @@ func parseTodo(comp *ical.Component, timezone *time.Location) (data *compData, e
 
 	if !data.dtstart.IsZero() {
 		// potentially an rrule
-		rrule_buf.WriteString(fmt.Sprintf("%s:%s\n", "DTSTART", data.dtstart.In(time.UTC).Format(dateWithUTCTimeFormat)))
+		if val := comp.Props.Get(ical.PropRecurrenceDates); val != nil {
+			return
+		} else if val := comp.Props.Get(ical.PropExceptionDates); val != nil {
+			return
+		}
 
 		if val := comp.Props.Get(ical.PropRecurrenceRule); val != nil {
-			rrule_buf.WriteString(fmt.Sprintf("%s:%s\n", val.Name, val.Value))
-		}
-
-		if val := comp.Props.Get(ical.PropRecurrenceDates); val != nil {
-			rrule_buf.WriteString(fmt.Sprintf("%s", val.Name))
-			switch val.ValueType() {
-			case ical.ValueDate:
-				rrule_buf.WriteString(fmt.Sprintf(";VALUE=DATE:%s", val.Value))
-			case ical.ValueDateTime:
-				if tzid := val.Params.Get(ical.ParamTimezoneID); tzid != "" {
-					rrule_buf.WriteString(fmt.Sprintf(";TZID=%s", tzid))
-				}
-				rrule_buf.WriteString(fmt.Sprintf(":%s\n", val.Value))
-			case ical.ValuePeriod:
-				// do not allow VALUE=PERIOD
+			if r, e := rrule.StrToRRule(fmt.Sprintf("%s:%s\n%s:%s",
+				"DTSTART",
+				data.dtstart.In(time.UTC).Format(dateWithUTCTimeFormat),
+				"RRULE",
+				val.Value,
+			)); e != nil {
 				return
-			default:
-				// not allowed by RFC
-				return
+			} else {
+				data.rrule = r
 			}
-		}
-
-		if val := comp.Props.Get(ical.PropExceptionDates); val != nil {
-			rrule_buf.WriteString(fmt.Sprintf("%s", val.Name))
-			switch val.ValueType() {
-			case ical.ValueDate:
-				rrule_buf.WriteString(fmt.Sprintf(";VALUE=DATE:%s", val.Value))
-			case ical.ValueDateTime:
-				if tzid := val.Params.Get(ical.ParamTimezoneID); tzid != "" {
-					rrule_buf.WriteString(fmt.Sprintf(";TZID=%s", tzid))
-				}
-				rrule_buf.WriteString(fmt.Sprintf(":%s\n", val.Value))
-			default:
-				// not allowed by RFC
-				return
-			}
-		}
-		if r, e := rrule.StrToRRuleSet(rrule_buf.String()); e != nil {
-			return
-		} else {
-			data.rset = r
 		}
 	} else {
 		// dtstart was not set yet; assume completed/created handling
@@ -523,7 +478,6 @@ func ParseCalendarObjectResource(cal *ical.Calendar, timezone *time.Location) (m
 			comps = append(comps, *comp)
 		}
 	}
-
 	// only allow one master
 	var has_master bool
 	for _, c := range comps {
@@ -535,10 +489,6 @@ func ParseCalendarObjectResource(cal *ical.Calendar, timezone *time.Location) (m
 				has_master = true
 			}
 		} else if val := c.comp.Props.Get(ical.PropRecurrenceRule); val != nil {
-			return
-		} else if val := c.comp.Props.Get(ical.PropRecurrenceDates); val != nil {
-			return
-		} else if val := c.comp.Props.Get(ical.PropExceptionDates); val != nil {
 			return
 		} else if val := c.comp.Props.Get(ical.PropRecurrenceID); val == nil {
 			return

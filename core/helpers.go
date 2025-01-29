@@ -16,6 +16,7 @@ import (
 
 	"github.com/emersion/go-ical"
 	"github.com/emersion/go-vcard"
+	"github.com/teambition/rrule-go"
 )
 
 var (
@@ -137,6 +138,12 @@ func newResourceType(names ...xml.Name) Any {
 
 func statusHelper(code int) status {
 	return status{Text: fmt.Sprintf("HTTP/1.1 %v %v", code, http.StatusText(code))}
+}
+
+func emptyCalendarData() *Any {
+	return &Any{
+		XMLName: calendarDataName,
+	}
 }
 
 func supportedReportSetHelper(names ...xml.Name) *Any {
@@ -464,7 +471,7 @@ func IfMatchifNoneMatch(etag string, ifmatch string, ifnonematch string) (err er
 func expandCalendar(source *ical.Calendar, expand *timeInterval, location *time.Location) (expanded *ical.Calendar, err error) {
 	expanded = ical.NewCalendar()
 	defer func() {
-		if len(expanded.Children) == 0 {
+		if err != nil || len(expanded.Children) == 0 {
 			expanded = nil
 			return
 		}
@@ -476,7 +483,7 @@ func expandCalendar(source *ical.Calendar, expand *timeInterval, location *time.
 		}
 	}()
 
-	expanded.Props.SetText(ical.PropProductID, "-//bq-caldav//expanded//EN")
+	expanded.Props.SetText(ical.PropProductID, "-//bq-caldav//expand//EN")
 	expanded.Props.SetText(ical.PropVersion, "2.0")
 	if md, e := ParseCalendarObjectResource(source, location); e != nil {
 		err = e
@@ -488,6 +495,35 @@ func expandCalendar(source *ical.Calendar, expand *timeInterval, location *time.
 			if c.recurrenceid.IsZero() {
 				master = &c
 			} else if c.Intersect(expand.start, expand.end) {
+				c.comp.Props.Del(ical.PropRecurrenceID)
+				c.dtstart = c.dtstart.In(time.UTC)
+				if v := c.comp.Props.Get(c.start_name); v == nil {
+					err = fmt.Errorf("nil start name in recurring event!")
+					return
+				} else if vt := v.ValueType(); false {
+					//
+				} else {
+					switch vt {
+					case ical.ValueDate:
+						c.comp.Props.SetDate(c.start_name, c.dtstart)
+					case ical.ValueDateTime:
+						c.comp.Props.SetDateTime(c.start_name, c.dtstart)
+					}
+				}
+				if v := c.comp.Props.Get(master.end_name); v == nil {
+					// do nothing
+				} else if vt := v.ValueType(); false {
+					//
+				} else {
+					switch vt {
+					case ical.ValueDuration:
+						c.comp.Props.SetText(ical.PropDuration, v.Value)
+					case ical.ValueDate:
+						c.comp.Props.SetDate(c.end_name, c.dtstart.Add(c.duration))
+					case ical.ValueDateTime:
+						c.comp.Props.SetDateTime(c.end_name, c.dtstart.Add(c.duration))
+					}
+				}
 				rescheds = append(rescheds, &c)
 			}
 		}
@@ -497,91 +533,82 @@ func expandCalendar(source *ical.Calendar, expand *timeInterval, location *time.
 		}
 
 		master.comp.Props.Del(ical.PropRecurrenceRule)
-		master.comp.Props.Del(ical.PropRecurrenceDates)
-		master.comp.Props.Del(ical.PropExceptionDates)
 
-		next := master.rset.Iterator()
-		if t, ok := next(); !ok {
-			if master.dtstart.Before(expand.end) && master.dtstart.After(expand.start) {
-				for _, c := range rescheds {
-					if c.recurrenceid == master.dtstart {
-						c.comp.Props.SetText(ical.PropUID, newUUID())
-						expanded.Children = append(expanded.Children, c.comp)
-						return
-					}
-				}
-				master.comp.Props.SetText(ical.PropUID, newUUID())
-				expanded.Children = append(expanded.Children, master.comp)
-				return
-			}
-		} else {
-			for {
-				fmt.Println(t.String())
-				for k, c := range rescheds {
-					if c.recurrenceid.Equal(t) {
-						c.comp.Props.SetText(ical.PropUID, newUUID())
-						expanded.Children = append(expanded.Children, c.comp)
-						if k+1 < len(rescheds) {
-							tmp := rescheds[k+1:]
-							rescheds = rescheds[:k]
-							rescheds = append(rescheds, tmp...)
-						} else {
-							rescheds = rescheds[:k]
-						}
-						goto jump
-					}
-				}
-
-				if t.Add(master.duration).Before(expand.start) {
-					goto jump
-				} else if t.After(expand.end) || t.Equal(expand.end) {
-					if len(rescheds) == 0 {
-						// nothing left to check
-						return
-					}
-					goto jump
-				}
-
-				if v := master.comp.Props.Get(master.start_name); v == nil {
-					err = fmt.Errorf("nil start name in recurring event!")
-					return
-				} else if vt := v.ValueType(); false {
-					//
-				} else {
-					switch vt {
-					case ical.ValueDate:
-						master.comp.Props.SetDate(master.start_name, t)
-					case ical.ValueDateTime:
-						master.comp.Props.SetDateTime(master.start_name, t)
-					}
-				}
-				if v := master.comp.Props.Get(master.end_name); v == nil {
-					// do nothing
-				} else if vt := v.ValueType(); false {
-					//
-				} else {
-					switch vt {
-					case ical.ValueDuration:
-						master.comp.Props.SetText(ical.PropDuration, v.Value)
-					case ical.ValueDate:
-						master.comp.Props.SetDate(master.end_name, t.Add(master.duration))
-					case ical.ValueDateTime:
-						master.comp.Props.SetDateTime(master.end_name, t.Add(master.duration))
-					}
-				}
-				expanded.Children = append(expanded.Children, deepCopy(master.comp))
-			jump:
-				t, ok = next()
-				if !ok {
-					return
-				}
-			}
+		var next rrule.Next = func() (time.Time, bool) {
+			return time.Time{}, false
 		}
 
+		if master.rrule != nil {
+			next = master.rrule.Iterator()
+		}
+
+		t := master.dtstart.In(time.UTC)
+		ok := true
+
+		for {
+			for k, c := range rescheds {
+				if c.recurrenceid.Equal(t) {
+					c.comp.Props.SetText(ical.PropUID, newUUID())
+					expanded.Children = append(expanded.Children, c.comp)
+					if k+1 < len(rescheds) {
+						tmp := rescheds[k+1:]
+						rescheds = rescheds[:k]
+						rescheds = append(rescheds, tmp...)
+					} else {
+						rescheds = rescheds[:k]
+					}
+					goto jump
+				}
+			}
+
+			if t.Add(master.duration).Before(expand.start) {
+				goto jump
+			} else if t.After(expand.end) || t.Equal(expand.end) {
+				if len(rescheds) == 0 {
+					// nothing left to check
+					return
+				}
+				goto jump
+			}
+
+			if v := master.comp.Props.Get(master.start_name); v == nil {
+				err = fmt.Errorf("nil start name in recurring event!")
+				return
+			} else if vt := v.ValueType(); false {
+				//
+			} else {
+				switch vt {
+				case ical.ValueDate:
+					master.comp.Props.SetDate(master.start_name, t)
+				case ical.ValueDateTime:
+					master.comp.Props.SetDateTime(master.start_name, t)
+				}
+			}
+			if v := master.comp.Props.Get(master.end_name); v == nil {
+				// do nothing
+			} else if vt := v.ValueType(); false {
+				//
+			} else {
+				switch vt {
+				case ical.ValueDuration:
+					master.comp.Props.SetText(ical.PropDuration, v.Value)
+				case ical.ValueDate:
+					master.comp.Props.SetDate(master.end_name, t.Add(master.duration))
+				case ical.ValueDateTime:
+					master.comp.Props.SetDateTime(master.end_name, t.Add(master.duration))
+				}
+			}
+			expanded.Children = append(expanded.Children, deepCopy(master.comp))
+		jump:
+			t, ok = next()
+			if !ok {
+				return
+			}
+		}
 	}
-	return
 }
 
+// used in expand request
 func newUUID() string {
 	var u [16]byte
 	if _, e := rand.Read(u[:]); e != nil {
@@ -597,6 +624,7 @@ func newUUID() string {
 	return fmt.Sprintf("%X-%X-%X-%X-%X", u[0:4], u[4:6], u[6:8], u[8:10], u[10:16])
 }
 
+// used in expand request
 func deepCopy(master *ical.Component) *ical.Component {
 	new_comp := ical.NewComponent(master.Name)
 	propmap := map[string][]ical.Prop(master.Props)
@@ -610,7 +638,36 @@ func deepCopy(master *ical.Component) *ical.Component {
 }
 
 func limitRecurrenceSet(source *ical.Calendar, limit_recurrence_set *timeInterval, location *time.Location) (limited *ical.Calendar, err error) {
-	limited = source
+	limited = ical.NewCalendar()
+	defer func() {
+		if err != nil {
+			limited = nil
+			return
+		}
+		// add the timezones
+		for _, c := range source.Children {
+			if c.Name == ical.CompTimezone {
+				limited.Children = append(limited.Children, c)
+			}
+		}
+	}()
+
+	limited.Props.SetText(ical.PropProductID, "-//bq-caldav//limit-recurrence-set//EN")
+	limited.Props.SetText(ical.PropVersion, "2.0")
+
+	if md, e := ParseCalendarObjectResource(source, location); e != nil {
+		err = e
+		return
+	} else {
+		for _, c := range md.comps {
+			if c.recurrenceid.IsZero() {
+				limited.Children = append(limited.Children, c.comp)
+			} else if c.Intersect(limit_recurrence_set.start, limit_recurrence_set.end) {
+				// add because it intersects
+				limited.Children = append(limited.Children, c.comp)
+			}
+		}
+	}
 	return
 }
 
@@ -812,7 +869,6 @@ func CalendarData(cal *ical.Calendar, cd *CalendarDataReq, location *time.Locati
 	} else {
 		cal = c
 	}
-	// it is unlikely but possible that cal has no events after expansion
 
 	if cd.LimitRecurrenceSet == nil {
 		// do nothing
@@ -822,6 +878,12 @@ func CalendarData(cal *ical.Calendar, cd *CalendarDataReq, location *time.Locati
 		cal = c
 	}
 
+	// it is unlikely, but possible, that cal has no events after expansion
+	// in this case, expandCalendar or limitRecurrenceSet should have set cal to nil
+	if cal == nil {
+		return emptyCalendarData(), nil
+	}
+
 	if cd.CompReq == nil {
 		// do nothing
 	} else if c, e := partialRetrieval(cal.Component, cd.CompReq); e != nil {
@@ -829,6 +891,7 @@ func CalendarData(cal *ical.Calendar, cd *CalendarDataReq, location *time.Locati
 	} else {
 		cal = &ical.Calendar{Component: c}
 	}
+	// after partial retrieval, cal should NOT be empty
 
 	raw, escaped := bytes.NewBuffer(nil), bytes.NewBuffer(nil)
 	if e := ical.NewEncoder(raw).Encode(cal); e != nil {
@@ -1201,7 +1264,7 @@ func CheckOtherCalendarPreconditions(collection_prop *Prop, md *CalendarMetaData
 				return e
 			} else {
 				for _, c := range md.comps {
-					if !rrule_count_instances(c.rset, l) {
+					if !rrule_count_instances(c.rrule, l) {
 						return &webDAVerror{
 							Code:      http.StatusForbidden,
 							Condition: &a.XMLName,

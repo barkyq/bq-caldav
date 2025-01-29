@@ -1,15 +1,16 @@
-# simple personal caldav and carddav server
+# Personal CalDAV and CardDAV server
 
-- supports a single WebDAV principal (at `"/"`)
-- supports a single calendar-home-set (at `"/calendars/"`)
-- supports a single addressbook-home-set (at `"/addressbook/"`)
-- supports gzip compression of responses
+- a single WebDAV principal (at `"/"`)
+- a single calendar-home-set (at `"/calendars/"`)
+- a single addressbook-home-set (at `"/addressbook/"`)
+- gzip compression of responses
+- supports `expand` calendar-data requests
 
-## running
+## Running
 
 run the binary with the flag `-backend path/to/backend` to specify where the server will store the calendar and addressbook files.
 
-## backend
+## Backend
 
 Currently the only backend implementation is `fsbackend` which transparently stores the resources in a directory structure:
 
@@ -65,7 +66,7 @@ The `props.xml` file has the following document structure:
 </prop>
 ```
 
-## authorization
+## Authorization
 
 The server should be run behind a reverse-proxy which handles HTTPS, authorization basic, and .well-known redirection, such as nginx. Here is an example configuration block for nginx:
 
@@ -96,3 +97,19 @@ server {
 	}
 }
 ```
+
+## Compliance with RFC 4791 (caldav)
+
+The implementation tries to be as compliant as is reasonable. There are some points where the server does not follow the RFC. Here is an incomplete list of failures of compliance
+
+- Allows queries with filters whose start and end times are not contained between the `min-date-time` and `max-date-time` properties.
+
+## Compliance with RFC 5455 (icalendar)
+
+The server is strict about calendar objects it receives. Besides the requirements specified in RFC 5455 and RFC 4791, this implementation adopts the following rules:
+
+- Calendar objects must have at exactly one toplevel non-timezone component without `RECURRENCE-ID` (the master component).
+- Calendar objects cannot contain `VFREEBUSY` components.
+- Components of type `VJOURNAL` cannot have `RRULE`, `RDATE`, `EXDATE`, or `RECURRENCE-ID` properties.
+- Components of type `VEVENT` and `VTODO` cannot have the `RDATE` or `EXDATE` properties (only `RRULE`).
+- Components with `RECURRENCE-ID` set cannot have `RRULE`, `RDATE`, or `EXDATE` properties.
