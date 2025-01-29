@@ -15,9 +15,10 @@ import (
 
 type compData struct {
 	uid          string
-	sequence     int64
 	dtstart      time.Time
 	duration     time.Duration
+	start_name   string
+	end_name     string
 	rset         *rrule.Set
 	recurrenceid time.Time
 	attendees    uint64
@@ -162,6 +163,7 @@ func parseJournal(comp *ical.Component, timezone *time.Location) (data *compData
 			return
 		} else {
 			data.dtstart = t
+			data.start_name = ical.PropDateTimeStart
 		}
 
 		switch val.ValueType() {
@@ -208,22 +210,13 @@ func parseEvent(comp *ical.Component, timezone *time.Location) (data *compData, 
 			return
 		} else {
 			data.dtstart = t
+			data.start_name = ical.PropDateTimeStart
 		}
 
 		rrule_buf.WriteString(fmt.Sprintf("%s:%s\n", val.Name, data.dtstart.Format(dateWithUTCTimeFormat)))
 	} else {
 		// need DTSTART
 		return
-	}
-
-	// get sequence
-	if val := comp.Props.Get(ical.PropSequence); val != nil {
-		if s, e := strconv.ParseInt(val.Value, 10, 64); e != nil {
-			err = e
-			return
-		} else {
-			data.sequence = s
-		}
 	}
 
 	// get duration
@@ -233,13 +226,15 @@ func parseEvent(comp *ical.Component, timezone *time.Location) (data *compData, 
 			return
 		} else {
 			data.duration = d
+			data.end_name = ical.PropDuration
 		}
-	} else if comp.Props.Get(ical.PropDateTimeEnd); val != nil {
+	} else if val := comp.Props.Get(ical.PropDateTimeEnd); val != nil {
 		if t, e := val.DateTime(timezone); e != nil {
 			err = e
 			return
 		} else {
 			data.duration = t.Sub(data.dtstart)
+			data.end_name = ical.PropDateTimeEnd
 		}
 	} else {
 		switch comp.Props.Get(ical.PropDateTimeStart).ValueType() {
@@ -282,7 +277,6 @@ func parseEvent(comp *ical.Component, timezone *time.Location) (data *compData, 
 			return
 		}
 	}
-
 	if val := comp.Props.Get(ical.PropExceptionDates); val != nil {
 		rrule_buf.WriteString(fmt.Sprintf("%s", val.Name))
 		switch val.ValueType() {
@@ -305,6 +299,7 @@ func parseEvent(comp *ical.Component, timezone *time.Location) (data *compData, 
 		data.rset = r
 	}
 
+	data.comp = comp
 	err = nil
 	return
 }
@@ -328,6 +323,7 @@ func parseTodo(comp *ical.Component, timezone *time.Location) (data *compData, e
 			return
 		} else {
 			data.dtstart = t
+			data.start_name = ical.PropDateTimeStart
 		}
 	}
 
@@ -342,8 +338,10 @@ func parseTodo(comp *ical.Component, timezone *time.Location) (data *compData, e
 		}
 		if data.dtstart.IsZero() {
 			data.dtstart = due
+			data.start_name = ical.PropDue
 		} else {
 			data.duration = due.Sub(data.dtstart)
+			data.end_name = ical.PropDue
 		}
 	} else if val := comp.Props.Get(ical.PropDuration); val != nil {
 		if data.dtstart.IsZero() {
@@ -354,6 +352,7 @@ func parseTodo(comp *ical.Component, timezone *time.Location) (data *compData, e
 			return
 		} else {
 			data.duration = d
+			data.end_name = ical.PropDuration
 		}
 	}
 
@@ -443,16 +442,6 @@ func parseTodo(comp *ical.Component, timezone *time.Location) (data *compData, e
 		data.duration = 1752000 * time.Hour
 	}
 
-	// get sequence
-	if val := comp.Props.Get(ical.PropSequence); val != nil {
-		if s, e := strconv.ParseInt(val.Value, 10, 64); e != nil {
-			err = e
-			return
-		} else {
-			data.sequence = s
-		}
-	}
-
 	// get recurrenceid
 	if val := comp.Props.Get(ical.PropRecurrenceID); val != nil {
 		if t, e := val.DateTime(nil); e != nil {
@@ -532,6 +521,18 @@ func ParseCalendarObjectResource(cal *ical.Calendar, timezone *time.Location) (m
 			return
 		} else {
 			comps = append(comps, *comp)
+		}
+	}
+
+	// check for recurrence-id
+	var has_master bool
+	for _, c := range comps {
+		if c.recurrenceid.IsZero() {
+			if has_master {
+				return
+			} else {
+				has_master = true
+			}
 		}
 	}
 

@@ -461,12 +461,120 @@ func IfMatchifNoneMatch(etag string, ifmatch string, ifnonematch string) (err er
 }
 
 func expandCalendar(source *ical.Calendar, expand *timeInterval, location *time.Location) (expanded *ical.Calendar, err error) {
-	if _, e := ParseCalendarObjectResource(source, location); e != nil {
+	expanded = ical.NewCalendar()
+	expanded.Props.SetText(ical.PropProductID, "-//bq-caldav//expanded//EN")
+	expanded.Props.SetText(ical.PropVersion, "2.0")
+	if md, e := ParseCalendarObjectResource(source, location); e != nil {
 		err = e
 		return
+	} else {
+		var master *compData
+		rescheds := make([]*compData, 0, len(md.comps))
+		for _, c := range md.comps {
+			if c.recurrenceid.IsZero() {
+				master = &c
+			} else if c.Intersect(expand.start, expand.end) {
+				rescheds = append(rescheds, &c)
+			}
+		}
+		if master == nil {
+			for _, c := range rescheds {
+				expanded.Children = append(expanded.Children, c.comp)
+			}
+			// TODO: rescheds could themselves be recurring with thisandfuture
+			return
+		}
+		master.comp.Props.Del(ical.PropRecurrenceRule)
+		master.comp.Props.Del(ical.PropRecurrenceDates)
+		master.comp.Props.Del(ical.PropExceptionDates)
+
+		next := master.rset.Iterator()
+		if t, ok := next(); !ok {
+			if master.dtstart.Before(expand.end) && master.dtstart.After(expand.start) {
+				for _, c := range rescheds {
+					if c.recurrenceid == master.dtstart {
+						expanded.Children = append(expanded.Children, c.comp)
+						return
+					}
+				}
+				expanded.Children = append(expanded.Children, master.comp)
+				return
+			}
+		} else {
+			for {
+				for k, c := range rescheds {
+					if c.recurrenceid.Equal(t) {
+						expanded.Children = append(expanded.Children, c.comp)
+						if k+1 < len(rescheds) {
+							tmp := rescheds[k+1:]
+							rescheds = rescheds[:k]
+							rescheds = append(rescheds, tmp...)
+						} else {
+							rescheds = rescheds[:k]
+						}
+						goto jump
+					}
+				}
+
+				if t.Add(master.duration).Before(expand.start) {
+					goto jump
+				} else if t.After(expand.end) || t.Equal(expand.end) {
+					if len(rescheds) == 0 {
+						// nothing left to check
+						return
+					}
+					goto jump
+				}
+
+				if v := master.comp.Props.Get(master.start_name); v == nil {
+					err = fmt.Errorf("nil start name in recurring event!")
+					return
+				} else if vt := v.ValueType(); false {
+					//
+				} else {
+					switch vt {
+					case ical.ValueDate:
+						master.comp.Props.SetDate(master.start_name, t)
+					case ical.ValueDateTime:
+						master.comp.Props.SetDateTime(master.start_name, t)
+					}
+				}
+				if v := master.comp.Props.Get(master.end_name); v == nil {
+					// do nothing
+				} else if vt := v.ValueType(); false {
+					//
+				} else {
+					switch vt {
+					case ical.ValueDuration:
+						master.comp.Props.SetText(ical.PropDuration, v.Value)
+					case ical.ValueDate:
+						master.comp.Props.SetDate(master.end_name, t.Add(master.duration))
+					case ical.ValueDateTime:
+						master.comp.Props.SetDateTime(master.end_name, t.Add(master.duration))
+					}
+				}
+				expanded.Children = append(expanded.Children, deepCopy(master.comp))
+			jump:
+				t, ok = next()
+				if !ok {
+					return
+				}
+			}
+		}
+
 	}
-	expanded = source
 	return
+}
+
+func deepCopy(master *ical.Component) *ical.Component {
+	new_comp := ical.NewComponent(master.Name)
+	propmap := map[string][]ical.Prop(master.Props)
+	for _, v := range propmap {
+		for _, p := range v {
+			new_comp.Props.Add(&p)
+		}
+	}
+	return new_comp
 }
 
 func limitRecurrenceSet(source *ical.Calendar, limit_recurrence_set *timeInterval, location *time.Location) (limited *ical.Calendar, err error) {
@@ -647,7 +755,8 @@ func ParseCalendarData(request HasCalendarDataProp) (*CalendarDataReq, error) {
 		cd := &CalendarDataReq{}
 		if e := xml.NewDecoder(buf).Decode(cd); e != nil {
 			return nil, &webDAVerror{
-				Code: http.StatusInternalServerError,
+				Code:      http.StatusBadRequest,
+				Condition: &calendarDataName,
 			}
 		} else if e := cd.checkCalendarDataReq(); e != nil {
 			return nil, e
