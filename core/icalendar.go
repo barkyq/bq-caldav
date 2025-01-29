@@ -213,7 +213,7 @@ func parseEvent(comp *ical.Component, timezone *time.Location) (data *compData, 
 			data.start_name = ical.PropDateTimeStart
 		}
 
-		rrule_buf.WriteString(fmt.Sprintf("%s:%s\n", val.Name, data.dtstart.Format(dateWithUTCTimeFormat)))
+		rrule_buf.WriteString(fmt.Sprintf("%s:%s\n", val.Name, data.dtstart.In(time.UTC).Format(dateWithUTCTimeFormat)))
 	} else {
 		// need DTSTART
 		return
@@ -263,7 +263,7 @@ func parseEvent(comp *ical.Component, timezone *time.Location) (data *compData, 
 		rrule_buf.WriteString(fmt.Sprintf("%s", val.Name))
 		switch val.ValueType() {
 		case ical.ValueDate:
-			rrule_buf.WriteString(fmt.Sprintf(";VALUE=DATE:%s", val.Value))
+			rrule_buf.WriteString(fmt.Sprintf(";VALUE=DATE:%s\n", val.Value))
 		case ical.ValueDateTime:
 			if tzid := val.Params.Get(ical.ParamTimezoneID); tzid != "" {
 				rrule_buf.WriteString(fmt.Sprintf(";TZID=%s", tzid))
@@ -281,7 +281,7 @@ func parseEvent(comp *ical.Component, timezone *time.Location) (data *compData, 
 		rrule_buf.WriteString(fmt.Sprintf("%s", val.Name))
 		switch val.ValueType() {
 		case ical.ValueDate:
-			rrule_buf.WriteString(fmt.Sprintf(";VALUE=DATE:%s", val.Value))
+			rrule_buf.WriteString(fmt.Sprintf(";VALUE=DATE:%s\n", val.Value))
 		case ical.ValueDateTime:
 			if tzid := val.Params.Get(ical.ParamTimezoneID); tzid != "" {
 				rrule_buf.WriteString(fmt.Sprintf(";TZID=%s", tzid))
@@ -358,7 +358,7 @@ func parseTodo(comp *ical.Component, timezone *time.Location) (data *compData, e
 
 	if !data.dtstart.IsZero() {
 		// potentially an rrule
-		rrule_buf.WriteString(fmt.Sprintf("%s:%s\n", "DTSTART", data.dtstart.Format(dateWithUTCTimeFormat)))
+		rrule_buf.WriteString(fmt.Sprintf("%s:%s\n", "DTSTART", data.dtstart.In(time.UTC).Format(dateWithUTCTimeFormat)))
 
 		if val := comp.Props.Get(ical.PropRecurrenceRule); val != nil {
 			rrule_buf.WriteString(fmt.Sprintf("%s:%s\n", val.Name, val.Value))

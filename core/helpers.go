@@ -2,6 +2,7 @@ package core
 
 import (
 	"bytes"
+	"crypto/rand"
 	"encoding/xml"
 	"errors"
 	"fmt"
@@ -462,6 +463,19 @@ func IfMatchifNoneMatch(etag string, ifmatch string, ifnonematch string) (err er
 
 func expandCalendar(source *ical.Calendar, expand *timeInterval, location *time.Location) (expanded *ical.Calendar, err error) {
 	expanded = ical.NewCalendar()
+	defer func() {
+		if len(expanded.Children) == 0 {
+			expanded = nil
+			return
+		}
+		// add the timezones
+		for _, c := range source.Children {
+			if c.Name == ical.CompTimezone {
+				expanded.Children = append(expanded.Children, c)
+			}
+		}
+	}()
+
 	expanded.Props.SetText(ical.PropProductID, "-//bq-caldav//expanded//EN")
 	expanded.Props.SetText(ical.PropVersion, "2.0")
 	if md, e := ParseCalendarObjectResource(source, location); e != nil {
@@ -481,6 +495,7 @@ func expandCalendar(source *ical.Calendar, expand *timeInterval, location *time.
 			err = fmt.Errorf("nil master; not allowed!")
 			return
 		}
+
 		master.comp.Props.Del(ical.PropRecurrenceRule)
 		master.comp.Props.Del(ical.PropRecurrenceDates)
 		master.comp.Props.Del(ical.PropExceptionDates)
@@ -490,17 +505,21 @@ func expandCalendar(source *ical.Calendar, expand *timeInterval, location *time.
 			if master.dtstart.Before(expand.end) && master.dtstart.After(expand.start) {
 				for _, c := range rescheds {
 					if c.recurrenceid == master.dtstart {
+						c.comp.Props.SetText(ical.PropUID, newUUID())
 						expanded.Children = append(expanded.Children, c.comp)
 						return
 					}
 				}
+				master.comp.Props.SetText(ical.PropUID, newUUID())
 				expanded.Children = append(expanded.Children, master.comp)
 				return
 			}
 		} else {
 			for {
+				fmt.Println(t.String())
 				for k, c := range rescheds {
 					if c.recurrenceid.Equal(t) {
+						c.comp.Props.SetText(ical.PropUID, newUUID())
 						expanded.Children = append(expanded.Children, c.comp)
 						if k+1 < len(rescheds) {
 							tmp := rescheds[k+1:]
@@ -563,6 +582,21 @@ func expandCalendar(source *ical.Calendar, expand *timeInterval, location *time.
 	return
 }
 
+func newUUID() string {
+	var u [16]byte
+	if _, e := rand.Read(u[:]); e != nil {
+		panic(e)
+	}
+
+	// Set version to 4 (random) -- 0100 in binary
+	u[6] = (u[6] & 0x0f) | 0x40
+
+	// Set variant to RFC 4122 -- 10xxxxxx
+	u[8] = (u[8] & 0x3f) | 0x80
+
+	return fmt.Sprintf("%X-%X-%X-%X-%X", u[0:4], u[4:6], u[6:8], u[8:10], u[10:16])
+}
+
 func deepCopy(master *ical.Component) *ical.Component {
 	new_comp := ical.NewComponent(master.Name)
 	propmap := map[string][]ical.Prop(master.Props)
@@ -571,6 +605,7 @@ func deepCopy(master *ical.Component) *ical.Component {
 			new_comp.Props.Add(&p)
 		}
 	}
+	new_comp.Props.SetText(ical.PropUID, newUUID())
 	return new_comp
 }
 
@@ -777,6 +812,7 @@ func CalendarData(cal *ical.Calendar, cd *CalendarDataReq, location *time.Locati
 	} else {
 		cal = c
 	}
+	// it is unlikely but possible that cal has no events after expansion
 
 	if cd.LimitRecurrenceSet == nil {
 		// do nothing
