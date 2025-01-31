@@ -223,17 +223,10 @@ func expandCalendar(source *ical.Calendar, expand *timeInterval, location *time.
 		return
 	} else {
 		var master *compData
-		var exdates []time.Time
 		rescheds := make([]*compData, 0, len(md.comps))
 		for _, c := range md.comps {
 			if c.recurrenceid.IsZero() {
 				master = &c
-				if exd, e := parseExDates(master.comp, location); e != nil {
-					err = e
-					return
-				} else {
-					exdates = exd
-				}
 			} else if c.Intersect(expand.start, expand.end) {
 				c.comp.Props.Del(ical.PropRecurrenceID)
 				c.dtstart = c.dtstart.In(time.UTC)
@@ -293,7 +286,7 @@ func expandCalendar(source *ical.Calendar, expand *timeInterval, location *time.
 		}
 
 		for {
-			for _, s := range exdates {
+			for _, s := range md.exdates {
 				if s.Equal(t) {
 					goto jump
 				}
@@ -317,6 +310,7 @@ func expandCalendar(source *ical.Calendar, expand *timeInterval, location *time.
 			} else {
 				rescheds = rescheds[pop_index:]
 			}
+			// reset pop_index for next round of iteration
 			pop_index = 0
 
 			if t.Add(master.duration).Before(expand.start) {

@@ -26,6 +26,7 @@ type compData struct {
 
 type CalendarMetaData struct {
 	ComponentType string
+	exdates       []time.Time
 	comps         []compData
 }
 
@@ -446,6 +447,7 @@ func parseCalendarComponent(comp *ical.Component, timezone *time.Location) (data
 
 func ParseCalendarObjectResource(cal *ical.Calendar, location *time.Location) (metadata *CalendarMetaData, err error) {
 	var component_type string
+	var exdates []time.Time
 	err = &webDAVerror{
 		Code:      http.StatusForbidden,
 		Condition: &validCalendarObjectResourceName,
@@ -472,17 +474,20 @@ func ParseCalendarObjectResource(cal *ical.Calendar, location *time.Location) (m
 		}
 	}
 
-	// only allow one master
 	var has_master bool
 	for _, c := range comps {
-		// opinionated; reschedulings cannot themselves be recurring
+		// opinionated: reschedulings cannot themselves be recurring
 		if c.recurrenceid.IsZero() {
 			if has_master {
+				// opinionated: only allow one master
 				return
 			} else {
 				has_master = true
-				if _, e := parseExDates(c.comp, location); e != nil {
+				if exd, e := parseExDates(c.comp, location); e != nil {
+					// check the master has well-formatted exdates
 					return
+				} else {
+					exdates = exd
 				}
 			}
 		} else if val := c.comp.Props.Get(ical.PropRecurrenceRule); val != nil {
@@ -500,7 +505,7 @@ func ParseCalendarObjectResource(cal *ical.Calendar, location *time.Location) (m
 		return
 	}
 
-	metadata = &CalendarMetaData{component_type, comps}
+	metadata = &CalendarMetaData{component_type, exdates, comps}
 	err = nil
 	return
 }
