@@ -278,10 +278,6 @@ func expandCalendar(source *ical.Calendar, expand *timeInterval, location *time.
 			return time.Time{}, false
 		}
 
-		if master.rrule != nil {
-			next = master.rrule.Iterator()
-		}
-
 		// need to sort to have proper popping of passed recurrence events
 		var pop_index int
 		sort.Slice(rescheds, func(i int, j int) bool {
@@ -290,6 +286,11 @@ func expandCalendar(source *ical.Calendar, expand *timeInterval, location *time.
 
 		t := master.dtstart.In(time.UTC)
 		ok := true
+		if master.rrule != nil {
+			next = master.rrule.Iterator()
+			// pop the first time
+			next()
+		}
 
 		for {
 			for _, s := range exdates {
