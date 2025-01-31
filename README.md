@@ -111,5 +111,5 @@ The server is strict about calendar objects it receives. Besides the requirement
 - Calendar objects must have at exactly one toplevel non-timezone component without `RECURRENCE-ID` (the master component).
 - Calendar objects cannot contain `VFREEBUSY` components.
 - Components of type `VJOURNAL` cannot have `RRULE`, `RDATE`, `EXDATE`, or `RECURRENCE-ID` properties.
-- Components of type `VEVENT` and `VTODO` cannot have the `RDATE` or `EXDATE` properties (only `RRULE`).
+- Components of type `VEVENT` and `VTODO` cannot have the `RDATE` property (only `RRULE` and `EXDATE`).
 - Components with `RECURRENCE-ID` set cannot have `RRULE`, `RDATE`, or `EXDATE` properties.
