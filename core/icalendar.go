@@ -444,7 +444,7 @@ func parseCalendarComponent(comp *ical.Component, timezone *time.Location) (data
 	return
 }
 
-func ParseCalendarObjectResource(cal *ical.Calendar, timezone *time.Location) (metadata *CalendarMetaData, err error) {
+func ParseCalendarObjectResource(cal *ical.Calendar, location *time.Location) (metadata *CalendarMetaData, err error) {
 	var component_type string
 	err = &webDAVerror{
 		Code:      http.StatusForbidden,
@@ -464,13 +464,14 @@ func ParseCalendarObjectResource(cal *ical.Calendar, timezone *time.Location) (m
 		} else if child.Name != component_type {
 			return
 		}
-		if comp, e := parseCalendarComponent(child, timezone); e != nil {
+		if comp, e := parseCalendarComponent(child, location); e != nil {
 			err = e
 			return
 		} else {
 			comps = append(comps, *comp)
 		}
 	}
+
 	// only allow one master
 	var has_master bool
 	for _, c := range comps {
@@ -480,8 +481,13 @@ func ParseCalendarObjectResource(cal *ical.Calendar, timezone *time.Location) (m
 				return
 			} else {
 				has_master = true
+				if _, e := parseExDates(c.comp, location); e != nil {
+					return
+				}
 			}
 		} else if val := c.comp.Props.Get(ical.PropRecurrenceRule); val != nil {
+			return
+		} else if val := c.comp.Props.Get(ical.PropExceptionDates); val != nil {
 			return
 		} else if val := c.comp.Props.Get(ical.PropRecurrenceID); val == nil {
 			return
@@ -495,6 +501,46 @@ func ParseCalendarObjectResource(cal *ical.Calendar, timezone *time.Location) (m
 	}
 
 	metadata = &CalendarMetaData{component_type, comps}
+	err = nil
+	return
+}
+
+func parseExDates(comp *ical.Component, location *time.Location) (exdates []time.Time, err error) {
+	exdates = make([]time.Time, 0, 8)
+	err = fmt.Errorf("bad exdates")
+	for _, p := range comp.Props.Values(ical.PropExceptionDates) {
+		switch p.ValueType() {
+		case ical.ValueDateTime:
+			if tzid := p.Params.Get(ical.ParamTimezoneID); tzid != "" {
+				if l, e := time.LoadLocation(tzid); e == nil {
+					location = l
+				}
+			}
+			for _, s := range strings.Split(p.Value, ",") {
+				if len(s) == len(dateWithUTCTimeFormat) {
+					if t, e := time.ParseInLocation(dateWithUTCTimeFormat, s, time.UTC); e == nil {
+						exdates = append(exdates, t)
+					} else {
+						return
+					}
+				} else {
+					if t, e := time.ParseInLocation(dateTimeFormat, s, location); e == nil {
+						exdates = append(exdates, t)
+					} else {
+						return
+					}
+				}
+			}
+		case ical.ValueDate:
+			for _, s := range strings.Split(p.Value, ",") {
+				if t, e := time.ParseInLocation(dateFormat, s, location); e == nil {
+					exdates = append(exdates, t)
+				} else {
+					return
+				}
+			}
+		}
+	}
 	err = nil
 	return
 }

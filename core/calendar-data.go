@@ -6,6 +6,7 @@ import (
 	"encoding/xml"
 	"fmt"
 	"net/http"
+	"sort"
 	"time"
 
 	"github.com/emersion/go-ical"
@@ -222,10 +223,17 @@ func expandCalendar(source *ical.Calendar, expand *timeInterval, location *time.
 		return
 	} else {
 		var master *compData
+		var exdates []time.Time
 		rescheds := make([]*compData, 0, len(md.comps))
 		for _, c := range md.comps {
 			if c.recurrenceid.IsZero() {
 				master = &c
+				if exd, e := parseExDates(master.comp, location); e != nil {
+					err = e
+					return
+				} else {
+					exdates = exd
+				}
 			} else if c.Intersect(expand.start, expand.end) {
 				c.comp.Props.Del(ical.PropRecurrenceID)
 				c.dtstart = c.dtstart.In(time.UTC)
@@ -274,24 +282,41 @@ func expandCalendar(source *ical.Calendar, expand *timeInterval, location *time.
 			next = master.rrule.Iterator()
 		}
 
+		// need to sort to have proper popping of passed recurrence events
+		var pop_index int
+		sort.Slice(rescheds, func(i int, j int) bool {
+			return rescheds[i].recurrenceid.Before(rescheds[j].recurrenceid)
+		})
+
 		t := master.dtstart.In(time.UTC)
 		ok := true
 
 		for {
+			for _, s := range exdates {
+				if s.Equal(t) {
+					goto jump
+				}
+			}
+
 			for k, c := range rescheds {
 				if c.recurrenceid.Equal(t) {
 					c.comp.Props.SetText(ical.PropUID, newUUID())
 					expanded.Children = append(expanded.Children, c.comp)
-					if k+1 < len(rescheds) {
-						tmp := rescheds[k+1:]
-						rescheds = rescheds[:k]
-						rescheds = append(rescheds, tmp...)
-					} else {
-						rescheds = rescheds[:k]
-					}
 					goto jump
+				} else if c.recurrenceid.Before(t) {
+					// we are passed the recurrence id so pop it
+					pop_index = k + 1
 				}
 			}
+
+			if pop_index == 0 {
+				// do nothing
+			} else if pop_index == len(rescheds) {
+				rescheds = nil
+			} else {
+				rescheds = rescheds[pop_index:]
+			}
+			pop_index = 0
 
 			if t.Add(master.duration).Before(expand.start) {
 				goto jump
