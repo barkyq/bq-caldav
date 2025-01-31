@@ -265,11 +265,6 @@ func parseEvent(comp *ical.Component, timezone *time.Location) (data *compData, 
 		return
 	}
 
-	if val := comp.Props.Get(ical.PropExceptionDates); val != nil {
-		// do not allow; android calendar cannot parse these events
-		return
-	}
-
 	if val := comp.Props.Get(ical.PropRecurrenceRule); val != nil {
 		if r, e := rrule.StrToRRule(fmt.Sprintf("%s:%s\n%s:%s",
 			"DTSTART",
@@ -341,8 +336,6 @@ func parseTodo(comp *ical.Component, timezone *time.Location) (data *compData, e
 	if !data.dtstart.IsZero() {
 		// potentially an rrule
 		if val := comp.Props.Get(ical.PropRecurrenceDates); val != nil {
-			return
-		} else if val := comp.Props.Get(ical.PropExceptionDates); val != nil {
 			return
 		}
 
