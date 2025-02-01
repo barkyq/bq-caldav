@@ -161,7 +161,9 @@ type PropertyUpdate struct {
 // preconditions/postconditions
 
 var (
-	validResourceTypeName           = xml.Name{Space: "DAV", Local: "valid-resourcetype"}
+	validResourceTypeName           = xml.Name{Space: "DAV:", Local: "valid-resourcetype"}
+	numberOfMatchesWithinLimitsName = xml.Name{Space: "DAV:", Local: "number-of-matches-within-limits"}
+
 	supportedCalendarDataName       = xml.Name{Space: "urn:ietf:params:xml:ns:caldav", Local: "supported-calendar-data"}
 	validCalendarDataName           = xml.Name{Space: "urn:ietf:params:xml:ns:caldav", Local: "valid-calendar-data"}
 	validCalendarObjectResourceName = xml.Name{Space: "urn:ietf:params:xml:ns:caldav", Local: "valid-calendar-object-resource"}
@@ -274,6 +276,8 @@ type Query struct {
 	Prop              *Prop              `xml:"DAV: prop"`
 	CalendarFilter    *calendarfilter    `xml:"urn:ietf:params:xml:ns:caldav filter"`
 	AddressbookFilter *addressbookfilter `xml:"urn:ietf:params:xml:ns:carddav filter"`
+	NResults          uint64             `xml:"urn:ietf:params:xml:ns:carddav limit>nresults"`
+	NSeen             uint64             `xml:"-"`
 	Timezone          *Timezone          `xml:"urn:ietf:params:xml:ns:caldav calendar-timezone"`
 	CalendarData      *CalendarDataReq   `xml:"-"`
 }
@@ -313,8 +317,9 @@ type calendarfilter struct {
 
 // https://datatracker.ietf.org/doc/html/rfc4791#section-9.7
 type addressbookfilter struct {
-	XMLName    xml.Name              `xml:"urn:ietf:params:xml:ns:carddav filter"`
-	PropFilter addressbookPropFilter `xml:"prop-filter"`
+	XMLName    xml.Name                `xml:"urn:ietf:params:xml:ns:carddav filter"`
+	AllOf      AllOf                   `xml:"test,attr"`
+	PropFilter []addressbookPropFilter `xml:"prop-filter"`
 }
 
 // https://tools.ietf.org/html/rfc4791#section-9.7.1
@@ -341,9 +346,28 @@ type calendarPropFilter struct {
 type addressbookPropFilter struct {
 	XMLName      xml.Name      `xml:"urn:ietf:params:xml:ns:carddav prop-filter"`
 	Name         string        `xml:"name,attr"`
+	AllOf        AllOf         `xml:"test,attr"`
 	IsNotDefined *struct{}     `xml:"is-not-defined"`
-	TextMatch    *textMatch    `xml:"text-match"`
+	TextMatch    []textMatch   `xml:"text-match"`
 	ParamFilter  []paramFilter `xml:"param-filter"`
+}
+
+type AllOf bool
+
+func (test *AllOf) UnmarshalText(text []byte) (err error) {
+	err = fmt.Errorf("invalid test attribute; must be anyof or allof")
+	if len(text) != 5 {
+		return
+	}
+	switch text[1] {
+	case 'n':
+		*test = false
+	case 'l':
+		*test = true
+	default:
+		return
+	}
+	return nil
 }
 
 // https://tools.ietf.org/html/rfc4791#section-9.7.3

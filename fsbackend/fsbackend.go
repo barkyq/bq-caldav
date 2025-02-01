@@ -331,7 +331,7 @@ func (b *FSBackend) checkAddressObject(r *http.Request, p string, card vcard.Car
 		//
 	} else if v, ok := b.uidmap[path.Dir(p)+":"+uid]; ok && v != r.URL.Path {
 		return nil, &core.UidConflict{Scope: core.AddressbookScope, Href: core.Href{Target: v}}
-	} else if d := bytes.Index(current_body, []byte(uid)); mt != nil && mt.Is(ical.MIMEType) && d == -1 {
+	} else if d := bytes.Index(current_body, []byte(uid)); mt != nil && mt.Is(vcard.MIMEType) && d == -1 {
 		return nil, &core.UidConflict{Scope: core.AddressbookScope, Href: core.Href{Target: r.URL.Path}}
 	} else if e := vcard.NewEncoder(buf).Encode(card); e != nil {
 		return nil, core.WebDAVerror(http.StatusInternalServerError, nil)
@@ -585,7 +585,7 @@ func (b *FSBackend) Query(r *http.Request, query *core.Query, depth byte) (ms *c
 			query.CalendarData = cd
 		}
 	case core.AddressbookScope:
-		if query_scope != core.AddressbookScope {
+		if query_scope != core.AddressbookScope || query.AddressbookFilter == nil {
 			err = core.WebDAVerror(http.StatusBadRequest, nil)
 			return
 		}
@@ -611,6 +611,7 @@ func (b *FSBackend) Query(r *http.Request, query *core.Query, depth byte) (ms *c
 			return
 		}
 	}
+
 	resps := make([]core.Response, 0, 128)
 	err = fs.WalkDir(b.fsys, p, func(q string, de fs.DirEntry, err error) error {
 		if depth == 1 && de.IsDir() && len(p) < len(q) {
@@ -629,6 +630,13 @@ func (b *FSBackend) Query(r *http.Request, query *core.Query, depth byte) (ms *c
 		}
 		return nil
 	})
+
+	// only relevant for addressbook-query
+	if query.NResults != 0 && query.NResults < query.NSeen {
+		// add a response
+		resps = append(resps, core.InsufficientStorage(r.URL.Path))
+	}
+
 	ms.Responses = resps
 	return
 }
@@ -667,8 +675,14 @@ func (b *FSBackend) queryFile(p string, fi fs.FileInfo, query *core.Query) (resp
 	case core.AddressbookScope:
 		// todo: filter via query
 		if card, e := vcard.NewDecoder(file).Decode(); e != nil {
+			err = e
+			return
+		} else if m := core.MatchCardWithQuery(card, query); !m {
+			// did not match
+			err = &notFound{}
 			return
 		} else if a, e := core.AddressData(card, query.Prop); e != nil {
+			err = e
 			return
 		} else if a != nil {
 			props_Found = append(props_Found, *a)

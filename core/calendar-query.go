@@ -1,7 +1,6 @@
 package core
 
 import (
-	"encoding/xml"
 	"fmt"
 	"net/http"
 	"strings"
@@ -11,15 +10,11 @@ import (
 )
 
 func CheckCalendarQueryFilterIsValid(query *Query) (err error) {
-	if b, e := xml.Marshal(query.CalendarFilter.CompFilter); e != nil {
-		return &webDAVerror{Code: http.StatusBadRequest}
-	} else {
-		err = &webDAVerror{
-			Code:      http.StatusForbidden,
-			Condition: &validFilterName,
-			Content:   b,
-		}
+	err = &webDAVerror{
+		Code:      http.StatusForbidden,
+		Condition: &validFilterName,
 	}
+
 	if query.CalendarFilter == nil {
 		return
 	} else if query.CalendarFilter.CompFilter.Name != ical.CompCalendar {
@@ -75,14 +70,9 @@ func CheckCalendarQueryFilterIsValid(query *Query) (err error) {
 
 func MatchCalendarWithQuery(cal *ical.Calendar, query *Query) (bool, error) {
 	if ok, e := matchCompFilterWithComp(query.CalendarFilter.CompFilter, cal.Component, query.Timezone.Location); e != nil {
-		if b, e := xml.Marshal(query.CalendarFilter.CompFilter); e != nil {
-			return false, &webDAVerror{Code: http.StatusBadRequest}
-		} else {
-			return false, &webDAVerror{
-				Code:      http.StatusForbidden,
-				Condition: &supportedFilterName,
-				Content:   b,
-			}
+		return false, &webDAVerror{
+			Code:      http.StatusForbidden,
+			Condition: &supportedFilterName,
 		}
 	} else {
 		return ok, nil
