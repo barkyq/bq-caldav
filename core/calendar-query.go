@@ -69,7 +69,7 @@ func CheckCalendarQueryFilterIsValid(query *Query) (err error) {
 }
 
 func MatchCalendarWithQuery(cal *ical.Calendar, query *Query) (bool, error) {
-	if ok, e := matchCompFilterWithComp(query.CalendarFilter.CompFilter, cal.Component, query.Timezone.Location); e != nil {
+	if ok, e := matchCompFilterWithComp(query.CalendarFilter.CompFilter, cal.Component, nil, query.Timezone.Location); e != nil {
 		return false, &webDAVerror{
 			Code:      http.StatusForbidden,
 			Condition: &supportedFilterName,
@@ -79,25 +79,35 @@ func MatchCalendarWithQuery(cal *ical.Calendar, query *Query) (bool, error) {
 	}
 }
 
-func matchCompFilterWithComp(cf compFilter, comp *ical.Component, location *time.Location) (match bool, err error) {
+func matchCompFilterWithComp(cf compFilter, comp *ical.Component, parent *ical.Component, location *time.Location) (match bool, err error) {
 	switch {
 	case cf.IsNotDefined != nil:
 		return false, nil
 	case cf.TimeRange != nil:
-		// todo: VFREEBUSY and VALARM
-		if comp.Name != ical.CompEvent && comp.Name != ical.CompToDo && comp.Name != ical.CompJournal {
-			return false, fmt.Errorf("unsupported comp in compfilter")
-		} else if data, e := parseCalendarComponent(comp, location); e != nil {
-			return false, e
-		} else if data.Intersect(cf.TimeRange.start, cf.TimeRange.end) {
-			return true, nil
-		} else {
-			return false, nil
+		switch comp.Name {
+		case ical.CompEvent, ical.CompToDo, ical.CompJournal, ical.CompFreeBusy:
+			if data, e := parseCalendarComponent(comp, location); e != nil {
+				return false, e
+			} else if data.Intersect(cf.TimeRange.start, cf.TimeRange.end) {
+				return true, nil
+			} else {
+				return false, nil
+			}
+		case ical.CompAlarm:
+			if yes, e := DoesAlarmIntersect(comp, parent, location, cf.TimeRange.start, cf.TimeRange.end); e != nil {
+				return false, e
+			} else if yes {
+				return true, nil
+			} else {
+				return false, nil
+			}
+		default:
+			return false, fmt.Errorf("unsupported comp for time-range")
 		}
 	case cf.PropFilters != nil || cf.CompFilters != nil:
 		if ok1, e := matchPropFiltersWithComp(cf.PropFilters, comp, location); e != nil {
 			return false, e
-		} else if ok2, e := matchCompFiltersWithCompChildren(cf.CompFilters, comp.Children, location); e != nil {
+		} else if ok2, e := matchCompFiltersWithCompChildren(cf.CompFilters, comp, location); e != nil {
 			return false, e
 		} else {
 			return ok1 && ok2, nil
@@ -122,9 +132,7 @@ outer:
 					return false, e
 				} else if t.After(pf.TimeRange.end) || t.Before(pf.TimeRange.start) || t.Equal(pf.TimeRange.end) {
 					continue
-				} else if ok, e := matchParamFiltersWithProp(pf.ParamFilter, &v); e != nil {
-					return false, e
-				} else if !ok {
+				} else if ok := matchParamFiltersWithProp(pf.ParamFilter, &v); !ok {
 					continue
 				} else {
 					continue outer
@@ -137,9 +145,7 @@ outer:
 					return false, fmt.Errorf("invalid value type for text-match")
 				} else if !matchTextMatchWithText(pf.TextMatch, v.Value) {
 					continue
-				} else if ok, e := matchParamFiltersWithProp(pf.ParamFilter, &v); e != nil {
-					continue
-				} else if !ok {
+				} else if ok := matchParamFiltersWithProp(pf.ParamFilter, &v); !ok {
 					continue
 				} else {
 					continue outer
@@ -148,9 +154,7 @@ outer:
 			return false, nil
 		case pf.ParamFilter != nil:
 			for _, v := range values {
-				if ok, e := matchParamFiltersWithProp(pf.ParamFilter, &v); e != nil {
-					return false, e
-				} else if !ok {
+				if ok := matchParamFiltersWithProp(pf.ParamFilter, &v); !ok {
 					continue
 				} else {
 					continue outer
@@ -166,18 +170,20 @@ outer:
 	return true, nil
 }
 
+var repl = strings.NewReplacer("\\n", "\n", "\\,", ",", "\\;", ";", "\\\\", "\\")
+
 func matchTextMatchWithText(tm *textMatch, text string) bool {
-	return strings.Contains(strings.ToLower(text), tm.Text)
+	return strings.Contains(strings.ToLower(repl.Replace(text)), tm.Text)
 }
 
-func matchParamFiltersWithProp(pfs []paramFilter, prop *ical.Prop) (ok bool, err error) {
+func matchParamFiltersWithProp(pfs []paramFilter, prop *ical.Prop) (ok bool) {
 outer:
 	for _, pf := range pfs {
 		values := prop.Params.Values(pf.Name)
 		switch {
 		case pf.IsNotDefined != nil:
 			if values != nil {
-				return false, nil
+				return false
 			}
 		case pf.TextMatch != nil:
 			for _, v := range values {
@@ -187,25 +193,25 @@ outer:
 					continue outer
 				}
 			}
-			return false, nil
+			return false
 		}
 	}
-	return true, nil
+	return true
 }
 
-func matchCompFiltersWithCompChildren(cfs []compFilter, children []*ical.Component, location *time.Location) (match bool, err error) {
+func matchCompFiltersWithCompChildren(cfs []compFilter, parent *ical.Component, location *time.Location) (match bool, err error) {
 outer:
 	for _, cf := range cfs {
-		for _, child := range children {
+		for _, child := range parent.Children {
 			if child.Name != cf.Name {
 				continue
-			} else if match, err = matchCompFilterWithComp(cf, child, location); err != nil {
+			} else if match, err = matchCompFilterWithComp(cf, child, parent, location); err != nil {
 				return false, err
 			} else if match {
 				continue outer
 			}
 		}
-		// nothing matched
+		// nothing matched cf
 		return false, nil
 	}
 	// everything matched

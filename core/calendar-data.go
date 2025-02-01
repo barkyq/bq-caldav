@@ -162,6 +162,14 @@ func CalendarData(cal *ical.Calendar, cd *CalendarDataReq, location *time.Locati
 		cal = c
 	}
 
+	if cd.LimitFreeBusySet == nil {
+		// do nothing
+	} else if c, e := limitFreeBusySet(cal, cd.LimitFreeBusySet); e != nil {
+		return nil, e
+	} else {
+		cal = c
+	}
+
 	// it is unlikely, but possible, that cal has no events after expansion
 	// in this case, expandCalendar or limitRecurrenceSet should have set cal to nil
 	if cal == nil {
@@ -191,6 +199,7 @@ func CalendarData(cal *ical.Calendar, cd *CalendarDataReq, location *time.Locati
 		// this will be bubbled up to internal server error
 		return nil, e
 	}
+
 	return &Any{
 		XMLName: calendarDataName,
 		Attr: []xml.Attr{
@@ -208,6 +217,13 @@ func CalendarData(cal *ical.Calendar, cd *CalendarDataReq, location *time.Locati
 }
 
 func expandCalendar(source *ical.Calendar, expand *timeInterval, location *time.Location) (expanded *ical.Calendar, err error) {
+	for _, child := range source.Children {
+		if child.Name == ical.CompJournal || child.Name == ical.CompFreeBusy {
+			expanded = source
+			return
+		}
+	}
+
 	expanded = ical.NewCalendar()
 	defer func() {
 		if err != nil || len(expanded.Children) == 0 {
@@ -395,7 +411,33 @@ func deepCopy(master *ical.Component) *ical.Component {
 	return new_comp
 }
 
+func limitFreeBusySet(source *ical.Calendar, limit_freebusy_set *timeInterval) (limited *ical.Calendar, err error) {
+	for _, child := range source.Children {
+		if child.Name == ical.CompFreeBusy {
+			old_props := child.Props.Values(ical.PropFreeBusy)
+			new_props := make([]ical.Prop, 0, len(old_props))
+			for _, v := range old_props {
+				if e := filterFreeBusyPeriod(&v, limit_freebusy_set.start, limit_freebusy_set.end); e != nil {
+					err = e
+					return
+				} else if v.Value != "" {
+					new_props = append(new_props, v)
+				}
+			}
+			child.Props[ical.PropFreeBusy] = new_props
+		}
+	}
+	return source, nil
+}
+
 func limitRecurrenceSet(source *ical.Calendar, limit_recurrence_set *timeInterval, location *time.Location) (limited *ical.Calendar, err error) {
+	for _, child := range source.Children {
+		if child.Name == ical.CompJournal || child.Name == ical.CompFreeBusy {
+			limited = source
+			return
+		}
+	}
+
 	limited = ical.NewCalendar()
 	defer func() {
 		if err != nil {

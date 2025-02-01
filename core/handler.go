@@ -128,6 +128,10 @@ func (h *Handler) handlePropPatch(w http.ResponseWriter, r *http.Request) error 
 				Code: http.StatusBadRequest,
 			}
 		}
+	} else if !isXML {
+		return &webDAVerror{
+			Code: http.StatusUnsupportedMediaType,
+		}
 	}
 
 	if ms, e := h.Backend.PropPatch(r, pp); e != nil {
@@ -199,12 +203,17 @@ func (h *Handler) handleReport(w http.ResponseWriter, r *http.Request) (err erro
 	if isXML, e := isContentXML(r.Header); e != nil {
 		err = e
 	} else if isXML {
-		err = xml.NewDecoder(r.Body).Decode(report)
+		if e := xml.NewDecoder(r.Body).Decode(report); e != nil {
+			err = &webDAVerror{
+				Code: http.StatusBadRequest,
+			}
+		}
 	} else if !isXML {
 		err = &webDAVerror{
 			Code: http.StatusUnsupportedMediaType,
 		}
 	}
+
 	if err != nil {
 		return err
 	}

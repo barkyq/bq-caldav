@@ -25,7 +25,7 @@ var (
 	statusBadRequest                                     = statusHelper(http.StatusBadRequest)
 	principalURL, currentUserPrincipal, principalAddress = newPrincipalURL("/")
 	defaultSupportedAddressData                          = supportedAddressDataHelper("3.0", "4.0")
-	defaultSupportedCalendarComponentSet                 = supportedCalendarComponentSetHelper("VEVENT", "VTODO", "VJOURNAL")
+	defaultSupportedCalendarComponentSet                 = supportedCalendarComponentSetHelper("VEVENT", "VTODO", "VJOURNAL", "VFREEBUSY")
 	defaultCalendarHomeSet                               = newCalendarHomeSet("/calendars/")
 	defaultAddressbookHomeSet                            = newAddressbookHomeSet("/addressbook/")
 	collectionResourceType                               = newResourceType(collectionTypeName)
@@ -584,19 +584,45 @@ outer:
 
 // put helper
 func CheckCalendarDataSupportedAndValid(content_type_header string, request_body io.Reader) (cal *ical.Calendar, err error) {
+	err = &webDAVerror{
+		Code:      http.StatusForbidden,
+		Condition: &supportedCalendarDataName,
+	}
+
 	if mt, _, e := mime.ParseMediaType(content_type_header); e != nil || mt != ical.MIMEType {
-		err = &webDAVerror{
-			Code:      http.StatusForbidden,
-			Condition: &supportedCalendarDataName,
-		}
-	} else if c, e := ical.NewDecoder(request_body).Decode(); e != nil {
-		err = &webDAVerror{
-			Code:      http.StatusForbidden,
-			Condition: &validCalendarDataName,
-		}
+		return
+	}
+
+	err = &webDAVerror{
+		Code:      http.StatusForbidden,
+		Condition: &validCalendarDataName,
+	}
+
+	if c, e := ical.NewDecoder(request_body).Decode(); e != nil {
+		return
 	} else {
 		cal = c
 	}
+
+	for _, child := range cal.Children {
+		for _, subchild := range child.Children {
+			switch subchild.Name {
+			case ical.CompAlarm:
+				if child.Name != ical.CompEvent && child.Name != ical.CompToDo {
+					return
+				} else if _, e := DoesAlarmIntersect(subchild, child, time.UTC, time.Now(), time.Time{}); e != nil {
+					// check all alarms can be used
+					return
+				}
+			case ical.CompTimezoneDaylight, ical.CompTimezoneStandard:
+				if child.Name != ical.CompTimezone {
+					return
+				}
+			}
+		}
+	}
+
+	err = nil
 	return
 }
 
@@ -917,7 +943,7 @@ func CheckMkColReq(scope Scope, prop_req []Prop) (resp []PropStat, prop_write Pr
 						for _, attr := range t.Attr {
 							if name, val := attr.Name.Local, attr.Value; name != "name" {
 								continue
-							} else if val != ical.CompEvent && val != ical.CompJournal && val != ical.CompToDo {
+							} else if val != ical.CompEvent && val != ical.CompJournal && val != ical.CompToDo && val != ical.CompFreeBusy {
 								check = false
 								break
 							}
@@ -932,7 +958,7 @@ func CheckMkColReq(scope Scope, prop_req []Prop) (resp []PropStat, prop_write Pr
 							}},
 						},
 						Status:              statusForbidden,
-						ResponseDescription: "only VEVENT, VTODO and VJOURNAL collections are supported",
+						ResponseDescription: "only VEVENT, VTODO, VJOURNAL, VFREEBUSY collections are supported",
 					})
 				} else {
 					write_props = append(write_props, a)
@@ -1006,7 +1032,7 @@ func CheckMkColReq(scope Scope, prop_req []Prop) (resp []PropStat, prop_write Pr
 		return
 	}
 	// todo: remove this once all components are supported;
-	// currently missing only freebusy, timezone, (and alarm)
+	// currently missing only timezone, (and alarm)
 	if scope == CalendarScope {
 		for _, w := range write_props {
 			if w.XMLName == supportedCalendarComponentSetName {

@@ -1,6 +1,7 @@
 package core
 
 import (
+	"bytes"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -21,7 +22,13 @@ type compData struct {
 	rrule        *rrule.RRule
 	recurrenceid time.Time
 	attendees    uint64
+	freebusy     []period
 	comp         *ical.Component
+}
+
+type period struct {
+	start    time.Time
+	duration time.Duration
 }
 
 type CalendarMetaData struct {
@@ -61,6 +68,10 @@ func (md *CalendarMetaData) GetUID() (uid string, err error) {
 }
 
 func intersect_helper(min time.Time, max time.Time, start time.Time, duration time.Duration) bool {
+	if start.IsZero() {
+		return false
+	}
+
 	if max.IsZero() && start.Add(duration).After(min) || start.Equal(min) && duration == 0 {
 		return true
 	}
@@ -113,6 +124,17 @@ func (data *compData) Intersect(min time.Time, max time.Time) (ok bool) {
 	if intersect_helper(min, max, data.dtstart, data.duration) {
 		return true
 	}
+
+	// now try freebusy
+	if periods := data.freebusy; periods != nil {
+		for _, period := range periods {
+			if intersect_helper(min, max, period.start, period.duration) {
+				return true
+			}
+		}
+		return false
+	}
+
 	// now try recurrence; safe for unbounded RRULE
 	return rrule_intersect_helper(min, max, data.rrule, data.duration)
 }
@@ -123,7 +145,7 @@ func parseDuration(val string) (dur time.Duration, err error) {
 	if val[0] == '-' {
 		minus = true
 	}
-	val = strings.Trim(val, "-+P")
+	val = strings.Trim(val, "-+PT")
 	for k, m := range symbolmap {
 		if before, after, found := strings.Cut(val, k); found {
 			if x, e := strconv.ParseInt(before, 10, 64); e != nil {
@@ -172,7 +194,6 @@ func parseJournal(comp *ical.Component, timezone *time.Location) (data *compData
 			return
 		} else {
 			data.dtstart = t
-			data.start_name = ical.PropDateTimeStart
 		}
 
 		switch val.ValueType() {
@@ -183,20 +204,145 @@ func parseJournal(comp *ical.Component, timezone *time.Location) (data *compData
 		}
 	}
 
-	// repl := strings.NewReplacer("\\n", "\n", "\\,", ",", "\\;", ";", "\\\\", "\\")
-	// // get summary
-	// if p := comp.Props.Get(ical.PropSummary); p != nil {
-	// 	data.summary = repl.Replace(p.Value)
-	// }
-
-	// // get descriptions
-	// descriptions := comp.Props.Values(ical.PropDescription)
-	// b := bytes.NewBuffer(nil)
-	// for _, v := range descriptions {
-	// 	b.WriteString(repl.Replace(v.Value))
-	// }
-	// data.description = b.String()
 	data.comp = comp
+	return
+}
+
+func parseFreeBusy(comp *ical.Component, timezone *time.Location) (data *compData, err error) {
+	data = &compData{}
+
+	// get UID
+	if val := comp.Props.Get(ical.PropUID); val != nil {
+		data.uid = val.Value
+	} else {
+		err = fmt.Errorf("parse error")
+		return
+	}
+
+	// VFREEBUSY cannot be recurring
+	if val := comp.Props.Get(ical.PropRecurrenceRule); val != nil {
+		return
+	} else if val := comp.Props.Get(ical.PropRecurrenceDates); val != nil {
+		return
+	} else if val := comp.Props.Get(ical.PropExceptionDates); val != nil {
+		return
+	} else if val := comp.Props.Get(ical.PropRecurrenceID); val != nil {
+		return
+	}
+
+	if val_start := comp.Props.Get(ical.PropDateTimeStart); val_start == nil {
+		//
+	} else if val_end := comp.Props.Get(ical.PropDateTimeEnd); val_end == nil {
+		//
+	} else {
+		// both DTSTART and DTEND, so this should be used for matching time.
+		if t, e := val_start.DateTime(timezone); e != nil {
+			err = e
+			return
+		} else {
+			data.dtstart = t
+		}
+		if t, e := val_end.DateTime(timezone); e != nil {
+			err = e
+			return
+		} else {
+			data.duration = t.Sub(data.dtstart)
+		}
+	}
+
+	if data.dtstart.IsZero() {
+		// need to get free busy periods to determine matching
+		data.freebusy = make([]period, 0, 32)
+		for _, fb := range comp.Props.Values(ical.PropFreeBusy) {
+			if periods, e := parseFreeBusyPeriod(fb); e != nil {
+				err = e
+				return
+			} else {
+				data.freebusy = append(data.freebusy, periods...)
+			}
+		}
+	}
+
+	data.comp = comp
+	return
+}
+
+// should check if the output has an empty value string
+func filterFreeBusyPeriod(p *ical.Prop, min time.Time, max time.Time) (err error) {
+	raw_periods := strings.Split(p.Value, ",")
+	new_value := bytes.NewBuffer(nil)
+	for _, raw_period := range raw_periods {
+		if start, end, found := strings.Cut(raw_period, "/"); !found {
+			err = fmt.Errorf("invalid period value")
+			return
+		} else if st, e := time.Parse(dateWithUTCTimeFormat, start); e != nil {
+			err = e
+			return
+		} else {
+			var dur time.Duration
+			switch strings.HasPrefix(end, "P") {
+			case true:
+				if d, e := parseDuration(end); e != nil {
+					err = e
+					return
+				} else {
+					dur = d
+				}
+			case false:
+				if et, e := time.Parse(dateWithUTCTimeFormat, end); e != nil {
+					err = e
+					return
+				} else {
+					dur = et.Sub(st)
+				}
+			}
+			if st.Before(max) && st.Add(dur).After(min) {
+				if new_value.Len() != 0 {
+					new_value.WriteByte(',')
+				}
+				new_value.WriteString(raw_period)
+			}
+		}
+	}
+	p.Value = new_value.String()
+	return
+}
+
+func parseFreeBusyPeriod(p ical.Prop) (periods []period, err error) {
+	err = fmt.Errorf("invalid period")
+	raw_periods := strings.Split(p.Value, ",")
+	periods = make([]period, len(raw_periods))
+	for k, raw_period := range raw_periods {
+		if start, end, found := strings.Cut(raw_period, "/"); !found {
+			return
+		} else if st, e := time.Parse(dateWithUTCTimeFormat, start); e != nil {
+			err = e
+			return
+		} else {
+			var dur time.Duration
+			switch strings.HasPrefix(end, "P") {
+			case true:
+				if d, e := parseDuration(end); e != nil {
+					err = e
+					return
+				} else {
+					dur = d
+				}
+			case false:
+				if et, e := time.Parse(dateWithUTCTimeFormat, end); e != nil {
+					err = e
+					return
+				} else {
+					dur = et.Sub(st)
+				}
+			}
+			if dur <= 0 {
+				return
+			}
+			periods[k] = period{start: st, duration: dur}
+		}
+	}
+	err = nil
 	return
 }
 
@@ -431,13 +577,12 @@ func parseCalendarComponent(comp *ical.Component, timezone *time.Location) (data
 		} else {
 			data = tdt
 		}
-	case ical.CompAlarm, ical.CompFreeBusy:
-		// not implemented
-		err = &webDAVerror{
-			Code:      http.StatusForbidden,
-			Condition: &supportedCalendarComponentName,
+	case ical.CompFreeBusy:
+		if fbdt, e := parseFreeBusy(comp, timezone); e != nil {
+			return
+		} else {
+			data = fbdt
 		}
-		return
 	default:
 		return
 	}
@@ -548,4 +693,86 @@ func parseExDates(comp *ical.Component, location *time.Location) (exdates []time
 	}
 	err = nil
 	return
+}
+
+func DoesAlarmIntersect(alarm *ical.Component, parent *ical.Component, location *time.Location, start time.Time, end time.Time) (yes bool, err error) {
+	err = fmt.Errorf("invalid alarm")
+	var alarm_repeat uint64 = 0
+	if p := alarm.Props.Get(ical.PropRepeat); p == nil {
+		//
+	} else if d, e := strconv.ParseUint(p.Value, 10, 64); e != nil {
+		return
+	} else {
+		alarm_repeat = d
+	}
+
+	var alarm_duration time.Duration = 0
+	if p := alarm.Props.Get(ical.PropDuration); p == nil {
+		//
+	} else if d, e := parseDuration(p.Value); e != nil {
+		return
+	} else {
+		alarm_duration = d
+	}
+
+	var parent_data *compData
+	if p := alarm.Props.Get(ical.PropTrigger); p == nil {
+		return
+	} else if pd, e := parseCalendarComponent(parent, location); e != nil {
+		return
+	} else {
+		parent_data = pd
+		switch p.ValueType() {
+		case ical.ValueDuration:
+			var duration time.Duration
+			if d, e := parseDuration(p.Value); e != nil {
+				return
+			} else {
+				duration = d
+			}
+			var reltype string = "START"
+			if rl := p.Params.Get(ical.ParamRelated); rl != "" {
+				reltype = rl
+			}
+			switch reltype {
+			case "START":
+				parent_data.dtstart = parent_data.dtstart.Add(duration)
+			case "END":
+				parent_data.dtstart = parent_data.dtstart.Add(parent_data.duration).Add(duration)
+			default:
+				return
+			}
+			parent_data.duration = 0
+		case ical.ValueDateTime:
+			if t, e := p.DateTime(location); e != nil {
+				return
+			} else {
+				parent_data.dtstart = t
+				parent_data.duration = 0
+			}
+		}
+	}
+
+	var i uint64 = 0
+
+	if alarm_repeat > 12 {
+		alarm_repeat = 12
+	}
+
+	for {
+		if ok := parent_data.Intersect(start, end); ok {
+			return true, nil
+		}
+
+		if alarm_duration == 0 {
+			return false, nil
+		}
+
+		if i < alarm_repeat {
+			parent_data.dtstart = parent_data.dtstart.Add(alarm_duration)
+			i++
+			continue
+		}
+		return false, nil
+	}
 }
