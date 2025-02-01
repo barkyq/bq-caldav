@@ -35,34 +35,38 @@ The `props.xml` file has the following document structure:
 ```text/xml
 <?xml version="1.0" encoding="UTF-8"?>
 <prop xmlns="DAV:">
-    <calendar-timezone xmlns="urn:ietf:params:xml:ns:caldav">
-        BEGIN:VCALENDAR
-        CALSCALE:GREGORIAN
-        PRODID:-//Apple Inc.//iPhone OS 18.1.1//EN
-        VERSION:2.0
-        BEGIN:VTIMEZONE
-        TZID:Europe/Paris
-        BEGIN:DAYLIGHT
-        DTSTART:19810329T020000
-        RRULE:FREQ=YEARLY;BYMONTH=3;BYDAY=-1SU
-        TZNAME:UTC+2
-        TZOFFSETFROM:+0100
-        TZOFFSETTO:+0200
-        END:DAYLIGHT
-        BEGIN:STANDARD
-        DTSTART:19961027T030000
-        RRULE:FREQ=YEARLY;BYMONTH=10;BYDAY=-1SU
-        TZNAME:UTC+1
-        TZOFFSETFROM:+0200
-        TZOFFSETTO:+0100
-        END:STANDARD
-        END:VTIMEZONE
-        END:VCALENDAR
-    </calendar-timezone>
-    <displayname xmlns="DAV:">default</displayname>
-    <calendar-color xmlns="http://apple.com/ns/ical/">#44798e</calendar-color>
-    <calendar-description xmlns="urn:ietf:params:xml:ns:caldav">default calendar</calendar-description>
-    <calendar-order xmlns="http://apple.com/ns/ical/">1</calendar-order>
+  <calendar-free-busy-set xmlns="urn:ietf:params:xml:ns:caldav">
+    <NO xmlns="urn:ietf:params:xml:ns:caldav"/>
+  </calendar-free-busy-set>
+  <supported-calendar-component-set xmlns="urn:ietf:params:xml:ns:caldav">
+    <comp xmlns="urn:ietf:params:xml:ns:caldav" name="VEVENT"/>
+  </supported-calendar-component-set>
+  <displayname xmlns="DAV:">default</displayname>
+  <calendar-order xmlns="http://apple.com/ns/ical/">1</calendar-order>
+  <calendar-timezone xmlns="urn:ietf:params:xml:ns:caldav">BEGIN:VCALENDAR&#13;
+CALSCALE:GREGORIAN&#13;
+PRODID:-//Apple Inc.//iPhone OS 18.1.1//EN&#13;
+VERSION:2.0&#13;
+BEGIN:VTIMEZONE&#13;
+TZID:Europe/Paris&#13;
+BEGIN:DAYLIGHT&#13;
+DTSTART:19810329T020000&#13;
+RRULE:FREQ=YEARLY;BYMONTH=3;BYDAY=-1SU&#13;
+TZNAME:UTC+2&#13;
+TZOFFSETFROM:+0100&#13;
+TZOFFSETTO:+0200&#13;
+END:DAYLIGHT&#13;
+BEGIN:STANDARD&#13;
+DTSTART:19961027T030000&#13;
+RRULE:FREQ=YEARLY;BYMONTH=10;BYDAY=-1SU&#13;
+TZNAME:UTC+1&#13;
+TZOFFSETFROM:+0200&#13;
+TZOFFSETTO:+0100&#13;
+END:STANDARD&#13;
+END:VTIMEZONE&#13;
+END:VCALENDAR&#13;
+</calendar-timezone>
+  <calendar-color xmlns="http://apple.com/ns/ical/">#479fd3</calendar-color>
 </prop>
 ```
 
