@@ -8,27 +8,59 @@ import (
 	"github.com/emersion/go-vcard"
 )
 
-func AddressData(card vcard.Card, prop *Prop) (*Any, error) {
-	if prop == nil {
+// Parses the request struct to extract the CalendarDataReq
+// Applies to calendar-multiget and calendar-query REPORT
+func ParseAddressData(request HasAddressDataProp) (*AddressDataReq, error) {
+	if adata := request.getAddressData(); adata == nil {
 		return nil, nil
+	} else if adata.Content != nil {
+		buf := bytes.NewBufferString("<address-data xmlns=\"urn:ietf:params:xml:ns:carddav\">")
+		buf.Write(adata.Content)
+		buf.WriteString("</address-data>")
+		ad := &AddressDataReq{}
+		if e := xml.NewDecoder(buf).Decode(ad); e != nil {
+			return nil, &webDAVerror{
+				Code:      http.StatusBadRequest,
+				Condition: &addressDataName,
+			}
+		} else {
+			return ad, nil
+		}
+	} else {
+		return &AddressDataReq{}, nil
 	}
-	var adata *Any
-	for _, val := range prop.Props {
-		if val.XMLName == addressDataName {
-			adata = &val
-			break
+}
+
+func cardPartialRetrieval(card vcard.Card, props []propReq) (new_card vcard.Card) {
+	new_card = make(vcard.Card)
+	props = append(props, propReq{Name: vcard.FieldFormattedName})
+	for _, prop := range props {
+		if _, ok := new_card[prop.Name]; ok {
+			continue
+		} else if fs, ok := card[prop.Name]; !ok {
+			continue
+		} else if prop.NoValue {
+			new_card[prop.Name] = []*vcard.Field{{Value: ""}}
+		} else {
+			new_card[prop.Name] = fs
 		}
 	}
-	if adata == nil {
+	vcard.ToV4(new_card)
+	return new_card
+}
+
+func AddressData(card vcard.Card, ad *AddressDataReq) (*Any, error) {
+	if ad == nil {
 		return nil, nil
-	}
-	if adata.Content != nil {
-		return nil, &webDAVerror{
-			Code: http.StatusNotImplemented,
-		}
 	}
 
-	vcard.ToV4(card)
+	if props := ad.Props; props != nil {
+		// partial retrieval
+		card = cardPartialRetrieval(card, props)
+	} else {
+		vcard.ToV4(card)
+	}
+
 	raw, escaped := bytes.NewBuffer(nil), bytes.NewBuffer(nil)
 	if e := vcard.NewEncoder(raw).Encode(card); e != nil {
 		// this will be bubbled up to internal server error

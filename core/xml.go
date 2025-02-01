@@ -207,6 +207,13 @@ type CalendarDataReq struct {
 	CompReq            *compReq      `xml:"urn:ietf:params:xml:ns:caldav comp"`
 }
 
+// calendar data elements
+type AddressDataReq struct {
+	XMLName xml.Name  `xml:"urn:ietf:params:xml:ns:carddav address-data"`
+	Allprop *struct{} `xml:"urn:ietf:params:xml:ns:carddav allprop"`
+	Props   []propReq `xml:"urn:ietf:params:xml:ns:carddav prop"`
+}
+
 type timeInterval struct {
 	start time.Time
 	end   time.Time
@@ -280,6 +287,7 @@ type Query struct {
 	NSeen             uint64             `xml:"-"`
 	Timezone          *Timezone          `xml:"urn:ietf:params:xml:ns:caldav calendar-timezone"`
 	CalendarData      *CalendarDataReq   `xml:"-"`
+	AddressData       *AddressDataReq    `xml:"-"`
 }
 
 type Timezone struct {
@@ -415,6 +423,7 @@ type Multiget struct {
 	Hrefs        []Href           `xml:"DAV: href"`
 	Timezone     *Timezone        `xml:"ietf:params:xml:ns:caldav calendar-timezone"`
 	CalendarData *CalendarDataReq `xml:"-"`
+	AddressData  *AddressDataReq  `xml:"-"`
 }
 
 type reportReq struct {
@@ -446,6 +455,36 @@ func (q *Query) getCalendarData() (cdata *Any) {
 	for _, val := range q.Prop.Props {
 		if val.XMLName == calendarDataName {
 			cdata = &val
+			break
+		}
+	}
+	return
+}
+
+type HasAddressDataProp interface {
+	getAddressData() (adata *Any)
+}
+
+func (m *Multiget) getAddressData() (adata *Any) {
+	if m.Prop == nil {
+		return nil
+	}
+	for _, val := range m.Prop.Props {
+		if val.XMLName == addressDataName {
+			adata = &val
+			break
+		}
+	}
+	return
+}
+
+func (q *Query) getAddressData() (adata *Any) {
+	if q.Prop == nil {
+		return nil
+	}
+	for _, val := range q.Prop.Props {
+		if val.XMLName == addressDataName {
+			adata = &val
 			break
 		}
 	}

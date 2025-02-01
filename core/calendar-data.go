@@ -172,10 +172,16 @@ func CalendarData(cal *ical.Calendar, cd *CalendarDataReq, location *time.Locati
 		// do nothing
 	} else if c, e := partialRetrieval(cal.Component, cd.CompReq); e != nil {
 		return nil, e
+	} else if c.Name != ical.CompCalendar || len(c.Children) == 0 {
+		cal = nil
 	} else {
 		cal = &ical.Calendar{Component: c}
 	}
-	// after partial retrieval, cal should NOT be empty
+
+	// it is possible, that cal has no events after partial retrieval
+	if cal == nil {
+		return emptyCalendarData(), nil
+	}
 
 	raw, escaped := bytes.NewBuffer(nil), bytes.NewBuffer(nil)
 	if e := ical.NewEncoder(raw).Encode(cal); e != nil {
@@ -427,10 +433,18 @@ func partialRetrieval(source *ical.Component, compReq *compReq) (partial *ical.C
 	if source.Name != compReq.Name {
 		return
 	}
+
+	if source.Name == ical.CompCalendar {
+		source.Props.SetText(ical.PropProductID, "-//bq-caldav//partial-retrieval//EN")
+	}
+
 	partial = ical.NewComponent(source.Name)
 	var required []string
 
-	source.Props.SetText(ical.PropProductID, "-//bq-caldav//partial-retrieval//EN")
+	if compReq.Allprop != nil {
+		partial.Props = source.Props
+		goto jump1
+	}
 
 	// need to do this, even though CalDAV RFC allows absence of required properties
 	// because go-ical will not encode if required properties are missing.
@@ -468,7 +482,11 @@ func partialRetrieval(source *ical.Component, compReq *compReq) (partial *ical.C
 			}
 		}
 	}
-
+jump1:
+	if compReq.Allcomp != nil {
+		partial.Children = source.Children
+		goto jump2
+	}
 	for _, c := range compReq.Comps {
 		for _, source_child := range source.Children {
 			if source_child.Name == c.Name {
@@ -481,5 +499,6 @@ func partialRetrieval(source *ical.Component, compReq *compReq) (partial *ical.C
 		}
 	}
 
+jump2:
 	return partial, nil
 }

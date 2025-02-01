@@ -588,6 +588,11 @@ func (b *FSBackend) Query(r *http.Request, query *core.Query, depth byte) (ms *c
 		if query_scope != core.AddressbookScope || query.AddressbookFilter == nil {
 			err = core.WebDAVerror(http.StatusBadRequest, nil)
 			return
+		} else if ad, e := core.ParseAddressData(query); e != nil {
+			err = e
+			return
+		} else {
+			query.AddressData = ad
 		}
 	}
 	ms = &core.MultiStatus{}
@@ -681,7 +686,7 @@ func (b *FSBackend) queryFile(p string, fi fs.FileInfo, query *core.Query) (resp
 			// did not match
 			err = &notFound{}
 			return
-		} else if a, e := core.AddressData(card, query.Prop); e != nil {
+		} else if a, e := core.AddressData(card, query.AddressData); e != nil {
 			err = e
 			return
 		} else if a != nil {
@@ -758,6 +763,11 @@ func (b *FSBackend) Multiget(r *http.Request, multiget *core.Multiget) (ms *core
 		if scope != core.AddressbookScope {
 			err = core.WebDAVerror(http.StatusBadRequest, nil)
 			return
+		} else if ad, e := core.ParseAddressData(multiget); e != nil {
+			err = e
+			return
+		} else {
+			multiget.AddressData = ad
 		}
 	}
 
@@ -827,7 +837,7 @@ jump:
 		if card, e := vcard.NewDecoder(file).Decode(); e != nil {
 			err = &notFound{}
 			return
-		} else if a, e := core.AddressData(card, multiget.Prop); e != nil {
+		} else if a, e := core.AddressData(card, multiget.AddressData); e != nil {
 			// todo: handle this better
 			err = &notFound{}
 			return
