@@ -1052,7 +1052,7 @@ func filterProps(new_props []Any) (filtered_props []Any) {
 	filtered_props = make([]Any, 0, len(new_props))
 	for _, prop := range new_props {
 		switch prop.XMLName {
-		case resourceTypeName, supportedCalendarComponentSetName, supportedAddressDataName:
+		case resourceTypeName, supportedAddressDataName:
 			continue
 		default:
 			filtered_props = append(filtered_props, prop)
