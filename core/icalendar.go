@@ -22,6 +22,7 @@ type compData struct {
 	end_name     string
 	rrule        *rrule.RRule
 	recurrenceid time.Time
+	transp       bool
 	attendees    uint64
 	freebusy     []Period
 	comp         *ical.Component
@@ -255,7 +256,7 @@ func parseFreeBusy(comp *ical.Component, timezone *time.Location) (data *compDat
 		// need to get free busy periods to determine matching
 		data.freebusy = make([]Period, 0, 32)
 		for _, fb := range comp.Props.Values(ical.PropFreeBusy) {
-			if periods, e := parseFreeBusyPeriod(fb); e != nil {
+			if periods, e := parseFreeBusyPeriod(fb, false); e != nil {
 				err = e
 				return
 			} else {
@@ -356,7 +357,7 @@ func eventToFreeBusyPeriods(cal *ical.Calendar, location *time.Location, start t
 	}
 
 	if master.rrule == nil {
-		if master.dtstart.Before(end) && master.dtstart.Add(master.duration).After(start) && master.duration != 0 {
+		if master.dtstart.Before(end) && master.dtstart.Add(master.duration).After(start) && master.duration != 0 && !master.transp {
 			return []Period{{start: master.dtstart, duration: master.duration}}, nil
 		} else {
 			return nil, nil
@@ -387,7 +388,9 @@ func eventToFreeBusyPeriods(cal *ical.Calendar, location *time.Location, start t
 
 		for k, c := range rescheds {
 			if c.recurrenceid.Equal(t) {
-				periods = append(periods, Period{c.dtstart, c.duration})
+				if !c.transp {
+					periods = append(periods, Period{c.dtstart, c.duration})
+				}
 				goto jump
 			} else if c.recurrenceid.Before(t) {
 				// we are passed the recurrence id so pop it
@@ -414,7 +417,9 @@ func eventToFreeBusyPeriods(cal *ical.Calendar, location *time.Location, start t
 			}
 			goto jump
 		}
-		periods = append(periods, Period{t, master.duration})
+		if !master.transp {
+			periods = append(periods, Period{t, master.duration})
+		}
 
 	jump:
 		t, ok = next()
@@ -426,7 +431,7 @@ func freebusyToFreeBusyPeriods(c *ical.Component, start time.Time, end time.Time
 	for _, fb := range c.Props.Values(ical.PropFreeBusy) {
 		if e := filterFreeBusyPeriod(&fb, start, end); e != nil {
 			err = e
-		} else if ps, e := parseFreeBusyPeriod(fb); e != nil {
+		} else if ps, e := parseFreeBusyPeriod(fb, true); e != nil {
 			err = e
 		} else {
 			periods = ps
@@ -435,9 +440,14 @@ func freebusyToFreeBusyPeriods(c *ical.Component, start time.Time, end time.Time
 	return
 }
 
-func parseFreeBusyPeriod(p ical.Prop) (periods []Period, err error) {
+func parseFreeBusyPeriod(p ical.Prop, no_transp bool) (periods []Period, err error) {
 	if p.Value == "" {
 		return nil, nil
+	}
+	if no_transp {
+		if p.Params.Get(ical.ParamFreeBusyType) == "FREE" {
+			return nil, nil
+		}
 	}
 	err = fmt.Errorf("invalid period")
 	raw_periods := strings.Split(p.Value, ",")
@@ -526,7 +536,7 @@ func parseEvent(comp *ical.Component, timezone *time.Location) (data *compData, 
 		}
 	}
 
-	// get recurrenceid
+	// get recurrenceid or recurrence rule (but not both)
 	if val := comp.Props.Get(ical.PropRecurrenceID); val != nil {
 		if t, e := val.DateTime(timezone); e != nil {
 			err = e
@@ -534,15 +544,7 @@ func parseEvent(comp *ical.Component, timezone *time.Location) (data *compData, 
 		} else {
 			data.recurrenceid = t
 		}
-	}
-
-	// recurrence rule
-	if val := comp.Props.Get(ical.PropRecurrenceDates); val != nil {
-		// do not allow; android calendar cannot parse these events
-		return
-	}
-
-	if val := comp.Props.Get(ical.PropRecurrenceRule); val != nil {
+	} else if val := comp.Props.Get(ical.PropRecurrenceRule); val != nil {
 		if r, e := rrule.StrToRRule(fmt.Sprintf("%s:%s\n%s:%s",
 			"DTSTART",
 			data.dtstart.In(time.UTC).Format(dateWithUTCTimeFormat),
@@ -552,6 +554,27 @@ func parseEvent(comp *ical.Component, timezone *time.Location) (data *compData, 
 			return
 		} else {
 			data.rrule = r
+		}
+	}
+
+	// no rdates allowed
+	if val := comp.Props.Get(ical.PropRecurrenceDates); val != nil {
+		// do not allow; android calendar cannot parse these events
+		return
+	}
+
+	// get transp
+	if val := comp.Props.Get(ical.PropTransparency); val != nil {
+		if val.Value == "TRANSPARENT" {
+			data.transp = true
+		}
+	}
+
+	if val := comp.Props.Get(ical.PropStatus); !data.transp && val != nil {
+		switch val.Value {
+		case "CONFIRMED", "TENTATIVE":
+		case "CANCELLED":
+			data.transp = true
 		}
 	}
 
