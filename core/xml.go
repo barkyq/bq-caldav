@@ -63,6 +63,7 @@ var (
 	calendarHomeSetName               = xml.Name{Space: "urn:ietf:params:xml:ns:caldav", Local: "calendar-home-set"}
 	calendarQueryName                 = xml.Name{Space: "urn:ietf:params:xml:ns:caldav", Local: "calendar-query"}
 	calendarMultiGetName              = xml.Name{Space: "urn:ietf:params:xml:ns:caldav", Local: "calendar-multiget"}
+	freeBusyQueryName                 = xml.Name{Space: "urn:ietf:params:xml:ns:caldav", Local: "free-busy-query"}
 	calendarDataName                  = xml.Name{Space: "urn:ietf:params:xml:ns:caldav", Local: "calendar-data"}
 	supportedCalendarComponentSetName = xml.Name{Space: "urn:ietf:params:xml:ns:caldav", Local: "supported-calendar-component-set"}
 	compName                          = xml.Name{Space: "urn:ietf:params:xml:ns:caldav", Local: "comp"}
@@ -421,14 +422,21 @@ type Multiget struct {
 	PropName     *struct{}        `xml:"DAV: propname"`
 	Prop         *Prop            `xml:"DAV: prop"`
 	Hrefs        []Href           `xml:"DAV: href"`
-	Timezone     *Timezone        `xml:"ietf:params:xml:ns:caldav calendar-timezone"`
+	Timezone     *Timezone        `xml:"urn:ietf:params:xml:ns:caldav calendar-timezone"`
 	CalendarData *CalendarDataReq `xml:"-"`
 	AddressData  *AddressDataReq  `xml:"-"`
+}
+
+// https://datatracker.ietf.org/doc/html/rfc4791#section-9.5
+type FBQuery struct {
+	XMLName   xml.Name      `xml:"urn:ietf:params:xml:ns:caldav free-busy-query"`
+	TimeRange *timeInterval `xml:"urn:ietf:params:xml:ns:caldav time-range"`
 }
 
 type reportReq struct {
 	Query    *Query
 	Multiget *Multiget
+	FBQuery  *FBQuery
 }
 
 type HasCalendarDataProp interface {
@@ -500,6 +508,9 @@ func (r *reportReq) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
 	case calendarMultiGetName, addressbookMultiGetName:
 		r.Multiget = &Multiget{}
 		v = r.Multiget
+	case freeBusyQueryName:
+		r.FBQuery = &FBQuery{}
+		v = r.FBQuery
 	default:
 		return &webDAVerror{http.StatusBadRequest, nil, nil}
 	}

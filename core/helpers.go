@@ -9,6 +9,7 @@ import (
 	"mime"
 	"net/http"
 	"path"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -172,7 +173,7 @@ func supportedReportSetHelper(names ...xml.Name) *Any {
 func (s Scope) supportedReportSet() *Any {
 	switch s {
 	case CalendarScope:
-		return supportedReportSetHelper(calendarQueryName, calendarMultiGetName)
+		return supportedReportSetHelper(calendarQueryName, calendarMultiGetName, freeBusyQueryName)
 	case AddressbookScope:
 		return supportedReportSetHelper(addressbookQueryName, addressbookMultiGetName)
 	default:
@@ -285,23 +286,23 @@ func CleanProps(scope Scope, props_Found []Any, propName *struct{}, include *Inc
 
 func DefaultPropsFile(content_type string, content_length int64, modified_time time.Time, etag string) []Any {
 	return []Any{
-		Any{
+		{
 			XMLName: resourceTypeName,
 			Content: nil,
 		},
-		Any{
+		{
 			XMLName: getContentTypeName,
 			Content: []byte(content_type),
 		},
-		Any{
+		{
 			XMLName: getContentLengthName,
 			Content: []byte(fmt.Sprintf("%d", content_length)),
 		},
-		Any{
+		{
 			XMLName: getLastModifiedName,
 			Content: []byte(modified_time.Format("Mon, 02 Jan 2006 15:04:05 MST")),
 		},
-		Any{
+		{
 			XMLName: getETagName,
 			Content: []byte(strconv.Quote(etag)),
 		},
@@ -580,6 +581,85 @@ outer:
 	return &MultiStatus{
 		Responses: resps,
 	}
+}
+
+// coalesce
+
+func CoalesceToFreeBusy(periods []Period, fbquery *FBQuery) (cal *ical.Calendar) {
+	sort.Slice(periods, func(i int, j int) bool {
+		return periods[i].start.Before(periods[j].start)
+	})
+
+	new_periods := make([]Period, 0, len(periods))
+	for {
+		if len(periods) == 0 {
+			break
+		}
+		t_start := periods[0].start
+		t_end := t_start.Add(periods[0].duration)
+		if t_start.Before(fbquery.TimeRange.start) {
+			t_start = fbquery.TimeRange.start
+		}
+		if t_end.After(fbquery.TimeRange.end) {
+			t_end = fbquery.TimeRange.end
+		}
+
+		if t_start.Equal(t_end) {
+			if len(periods) == 1 {
+				break
+			} else {
+				periods = periods[1:]
+				continue
+			}
+		}
+
+		var last_seen int
+		for k, p := range periods[1:] {
+			if p.start.After(t_end) {
+				last_seen = k
+				periods = periods[1+last_seen:]
+				goto jump
+			} else if t := p.start.Add(p.duration); t.After(t_end) {
+				t_end = t
+				continue
+			} else {
+				continue
+			}
+		}
+		periods = nil
+	jump:
+		new_periods = append(new_periods, Period{t_start.In(time.UTC), t_end.Sub(t_start)})
+		continue
+	}
+
+	buf := bytes.NewBuffer(nil)
+	for k, p := range new_periods {
+		if k != 0 {
+			fmt.Fprintf(buf, ",%s/%s", p.start.Format(dateWithUTCTimeFormat), p.start.Add(p.duration).Format(dateWithUTCTimeFormat))
+		} else {
+			fmt.Fprintf(buf, "%s/%s", p.start.Format(dateWithUTCTimeFormat), p.start.Add(p.duration).Format(dateWithUTCTimeFormat))
+		}
+	}
+
+	cal = ical.NewCalendar()
+	cal.Props.SetText(ical.PropProductID, "-//bq-caldav//free-busy-query//EN")
+	cal.Props.SetText(ical.PropVersion, "2.0")
+
+	comp := ical.NewComponent(ical.CompFreeBusy)
+	comp.Props.SetText(ical.PropUID, newUUID())
+	comp.Props.SetDateTime(ical.PropDateTimeStamp, time.Now().In(time.UTC))
+	comp.Props.SetDateTime(ical.PropDateTimeStart, fbquery.TimeRange.start.In(time.UTC))
+	comp.Props.SetDateTime(ical.PropDateTimeEnd, fbquery.TimeRange.end.In(time.UTC))
+
+	if buf.Len() != 0 {
+		prop := &ical.Prop{Name: ical.PropFreeBusy, Params: make(ical.Params), Value: buf.String()}
+		prop.Params.Add(ical.ParamFreeBusyType, "BUSY")
+		comp.Props.Set(prop)
+	}
+
+	cal.Children = []*ical.Component{comp}
+
+	return
 }
 
 // put helper

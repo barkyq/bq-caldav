@@ -16,6 +16,7 @@ import (
 	"path"
 	"strings"
 	"sync"
+	"time"
 
 	"bq-caldav/core"
 
@@ -103,7 +104,7 @@ func (b *FSBackend) Get(r *http.Request) (body []byte, content_type string, err 
 		err = core.WebDAVerror(http.StatusNotFound, nil)
 	} else if fi, e := fs.Stat(b.fsys, p); e != nil {
 		err = core.WebDAVerror(http.StatusNotFound, nil)
-	} else if fi.IsDir(); e != nil {
+	} else if fi.IsDir() {
 		err = core.WebDAVerror(http.StatusMethodNotAllowed, nil)
 	} else if etag, mt, _, b, e := b.getETagMTCLBody(p); e != nil {
 		// potentially bubble up to internal server error
@@ -859,6 +860,50 @@ jump:
 		PropStats: propstats,
 		Hrefs:     []core.Href{{Target: p}},
 	}, nil
+}
+
+// FBQuery
+func (b *FSBackend) FBQuery(r *http.Request, fbquery *core.FBQuery, depth byte) (resp []byte, err error) {
+	// with this implementation, REPORT must be targeting /calendars/X
+	p := path.Clean(r.URL.Path[1:])
+	if elements := strings.Split(p, "/"); len(elements) == 3 {
+		err = core.WebDAVerror(http.StatusForbidden, nil)
+	} else if len(elements) < 2 {
+		err = core.WebDAVerror(http.StatusMethodNotAllowed, nil)
+	} else if fi, e := fs.Stat(b.fsys, p); e != nil {
+		err = core.WebDAVerror(http.StatusNotFound, nil)
+	} else if !fi.IsDir() {
+		err = core.WebDAVerror(http.StatusForbidden, nil)
+	}
+
+	periods := make([]core.Period, 0, 128)
+	if e := fs.WalkDir(b.fsys, p, func(q string, de fs.DirEntry, err error) error {
+		if err != nil || de.IsDir() {
+			return nil
+		} else if file, e := b.fsys.Open(q); e != nil {
+			return nil
+		} else if cal, e := ical.NewDecoder(file).Decode(); e != nil {
+			return file.Close()
+		} else if e := file.Close(); e != nil {
+			return e
+		} else if ps, e := core.FBQueryObject(cal, time.Local, fbquery, periods); e != nil {
+			return e
+		} else {
+			periods = ps
+		}
+		return nil
+	}); e != nil {
+		err = e
+		return
+	}
+
+	cal := core.CoalesceToFreeBusy(periods, fbquery)
+	buf := bytes.NewBuffer(nil)
+	if e := ical.NewEncoder(buf).Encode(cal); e != nil {
+		return nil, e
+	} else {
+		return buf.Bytes(), nil
+	}
 }
 
 // OPTIONS

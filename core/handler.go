@@ -17,6 +17,7 @@ type Backend interface {
 	MkCol(r *http.Request, props []Prop) (resp []PropStat, err error)
 	Query(r *http.Request, query *Query, depth byte) (ms *MultiStatus, err error)
 	Multiget(r *http.Request, multiget *Multiget) (ms *MultiStatus, err error)
+	FBQuery(r *http.Request, fbquery *FBQuery, depth byte) (resp []byte, err error)
 	Options(r *http.Request) (caps []string, allow []string)
 }
 
@@ -24,7 +25,7 @@ type Handler struct {
 	Backend Backend
 }
 
-func (h *Handler) serveOptions(caps []string, allow []string, w http.ResponseWriter, r *http.Request) {
+func (h *Handler) serveOptions(caps []string, allow []string, w http.ResponseWriter) {
 	if caps != nil {
 		w.Header().Add("DAV", strings.Join(caps, ", "))
 	}
@@ -204,6 +205,7 @@ func (h *Handler) handleReport(w http.ResponseWriter, r *http.Request) (err erro
 		err = e
 	} else if isXML {
 		if e := xml.NewDecoder(r.Body).Decode(report); e != nil {
+			println(e.Error())
 			err = &webDAVerror{
 				Code: http.StatusBadRequest,
 			}
@@ -235,6 +237,21 @@ func (h *Handler) handleReport(w http.ResponseWriter, r *http.Request) (err erro
 		ms, err = h.Backend.Query(r, report.Query, depth)
 	} else if report.Multiget != nil {
 		ms, err = h.Backend.Multiget(r, report.Multiget)
+	} else if report.FBQuery != nil {
+		if report.FBQuery.TimeRange.start.Compare(report.FBQuery.TimeRange.end) != -1 {
+			return &webDAVerror{
+				Code: http.StatusBadRequest,
+			}
+		}
+
+		if resp, e := h.Backend.FBQuery(r, report.FBQuery, depth); e != nil {
+			return e
+		} else {
+			w.Header().Add("Content-Type", "text/calendar; charset=utf-8")
+			w.WriteHeader(http.StatusOK)
+			w.Write(resp)
+			return nil
+		}
 	}
 
 	if err != nil {
@@ -269,7 +286,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 mux:
 	switch r.Method {
 	case http.MethodOptions:
-		h.serveOptions(caps, allow, w, r)
+		h.serveOptions(caps, allow, w)
 	case "PROPFIND":
 		err = h.handlePropFind(w, r)
 	case "REPORT":

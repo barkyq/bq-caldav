@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -22,11 +23,11 @@ type compData struct {
 	rrule        *rrule.RRule
 	recurrenceid time.Time
 	attendees    uint64
-	freebusy     []period
+	freebusy     []Period
 	comp         *ical.Component
 }
 
-type period struct {
+type Period struct {
 	start    time.Time
 	duration time.Duration
 }
@@ -252,7 +253,7 @@ func parseFreeBusy(comp *ical.Component, timezone *time.Location) (data *compDat
 
 	if data.dtstart.IsZero() {
 		// need to get free busy periods to determine matching
-		data.freebusy = make([]period, 0, 32)
+		data.freebusy = make([]Period, 0, 32)
 		for _, fb := range comp.Props.Values(ical.PropFreeBusy) {
 			if periods, e := parseFreeBusyPeriod(fb); e != nil {
 				err = e
@@ -308,10 +309,139 @@ func filterFreeBusyPeriod(p *ical.Prop, min time.Time, max time.Time) (err error
 	return
 }
 
-func parseFreeBusyPeriod(p ical.Prop) (periods []period, err error) {
+func FBQueryObject(cal *ical.Calendar, location *time.Location, fbquery *FBQuery, periods_in []Period) (periods_out []Period, err error) {
+	for _, c := range cal.Children {
+		switch c.Name {
+		case ical.CompJournal, ical.CompToDo:
+			periods_out = periods_in
+			return
+		case ical.CompEvent:
+			if ps, e := eventToFreeBusyPeriods(cal, location, fbquery.TimeRange.start, fbquery.TimeRange.end); e != nil {
+				err = e
+			} else {
+				periods_out = append(periods_in, ps...)
+			}
+			return
+		case ical.CompFreeBusy:
+			if ps, e := freebusyToFreeBusyPeriods(c, fbquery.TimeRange.start, fbquery.TimeRange.end); e != nil {
+				err = e
+			} else {
+				periods_out = append(periods_in, ps...)
+			}
+			return
+		}
+	}
+	return
+}
+
+func eventToFreeBusyPeriods(cal *ical.Calendar, location *time.Location, start time.Time, end time.Time) (periods []Period, err error) {
+	// receive the full calendar to handle master + rescheds
+	var master *compData
+	var rescheds []*compData
+	var exdates []time.Time
+
+	if md, e := ParseCalendarObjectResource(cal, location); e != nil {
+		err = e
+		return
+	} else {
+		exdates = md.exdates
+		rescheds = make([]*compData, 0, len(md.comps)-1)
+		for _, c := range md.comps {
+			if c.recurrenceid.IsZero() {
+				master = &c
+			} else if c.Intersect(start, end) {
+				rescheds = append(rescheds, &c)
+			}
+		}
+	}
+
+	if master.rrule == nil {
+		if master.dtstart.Before(end) && master.dtstart.Add(master.duration).After(start) && master.duration != 0 {
+			return []Period{{start: master.dtstart, duration: master.duration}}, nil
+		} else {
+			return nil, nil
+		}
+	}
+
+	periods = make([]Period, 0, 16)
+	next := master.rrule.Iterator()
+
+	// need to sort to have proper popping of passed recurrence events
+	var pop_index int
+	sort.Slice(rescheds, func(i int, j int) bool {
+		return rescheds[i].recurrenceid.Before(rescheds[j].recurrenceid)
+	})
+
+	t, ok := next()
+
+	for {
+		if !ok {
+			return
+		}
+
+		for _, s := range exdates {
+			if s.Equal(t) {
+				goto jump
+			}
+		}
+
+		for k, c := range rescheds {
+			if c.recurrenceid.Equal(t) {
+				periods = append(periods, Period{c.dtstart, c.duration})
+				goto jump
+			} else if c.recurrenceid.Before(t) {
+				// we are passed the recurrence id so pop it
+				pop_index = k + 1
+			}
+		}
+
+		if pop_index == 0 {
+			// do nothing
+		} else if pop_index == len(rescheds) {
+			rescheds = nil
+		} else {
+			rescheds = rescheds[pop_index:]
+		}
+		// reset pop_index for next round of iteration
+		pop_index = 0
+
+		if t.Add(master.duration).Before(start) {
+			goto jump
+		} else if t.After(end) || t.Equal(end) {
+			if len(rescheds) == 0 {
+				// nothing left to check
+				return
+			}
+			goto jump
+		}
+		periods = append(periods, Period{t, master.duration})
+
+	jump:
+		t, ok = next()
+	}
+
+}
+
+func freebusyToFreeBusyPeriods(c *ical.Component, start time.Time, end time.Time) (periods []Period, err error) {
+	for _, fb := range c.Props.Values(ical.PropFreeBusy) {
+		if e := filterFreeBusyPeriod(&fb, start, end); e != nil {
+			err = e
+		} else if ps, e := parseFreeBusyPeriod(fb); e != nil {
+			err = e
+		} else {
+			periods = ps
+		}
+	}
+	return
+}
+
+func parseFreeBusyPeriod(p ical.Prop) (periods []Period, err error) {
+	if p.Value == "" {
+		return nil, nil
+	}
 	err = fmt.Errorf("invalid period")
 	raw_periods := strings.Split(p.Value, ",")
-	periods = make([]period, len(raw_periods))
+	periods = make([]Period, len(raw_periods))
 	for k, raw_period := range raw_periods {
 		if start, end, found := strings.Cut(raw_period, "/"); !found {
 			return
@@ -339,7 +469,7 @@ func parseFreeBusyPeriod(p ical.Prop) (periods []period, err error) {
 			if dur <= 0 {
 				return
 			}
-			periods[k] = period{start: st, duration: dur}
+			periods[k] = Period{start: st, duration: dur}
 		}
 	}
 	err = nil
@@ -552,7 +682,7 @@ func parseTodo(comp *ical.Component, timezone *time.Location) (data *compData, e
 	return
 }
 
-func parseCalendarComponent(comp *ical.Component, timezone *time.Location) (data *compData, err error) {
+func parseCalendarComponent(comp *ical.Component, location *time.Location) (data *compData, err error) {
 	err = &webDAVerror{
 		Code:      http.StatusForbidden,
 		Condition: &validCalendarObjectResourceName,
@@ -560,25 +690,25 @@ func parseCalendarComponent(comp *ical.Component, timezone *time.Location) (data
 
 	switch comp.Name {
 	case ical.CompEvent:
-		if edt, e := parseEvent(comp, timezone); e != nil {
+		if edt, e := parseEvent(comp, location); e != nil {
 			return
 		} else {
 			data = edt
 		}
 	case ical.CompJournal:
-		if jdt, e := parseJournal(comp, timezone); e != nil {
+		if jdt, e := parseJournal(comp, location); e != nil {
 			return
 		} else {
 			data = jdt
 		}
 	case ical.CompToDo:
-		if tdt, e := parseTodo(comp, timezone); e != nil {
+		if tdt, e := parseTodo(comp, location); e != nil {
 			return
 		} else {
 			data = tdt
 		}
 	case ical.CompFreeBusy:
-		if fbdt, e := parseFreeBusy(comp, timezone); e != nil {
+		if fbdt, e := parseFreeBusy(comp, location); e != nil {
 			return
 		} else {
 			data = fbdt
