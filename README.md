@@ -108,12 +108,20 @@ The implementation tries to be as compliant as is reasonable. There are some poi
 
 - Allows queries with filters whose start and end times are not contained between the `min-date-time` and `max-date-time` properties.
 
+- Does not support the `DAV:expand-property` report. This seems to have pretty niche use cases for the intended application, and I am mystified why it is a MUST in the CalDAV RFC.
+
+- Does not currently support the `CALDAV:free-busy-query` report.
+
+- Ignores any collation set information in the text-match XML element, and simply computes:
+```go
+strings.Contains(strings.ToLower(target_string), strings.ToLower(match_string))
+``` 
+
 ## Compliance with RFC 5455 (icalendar)
 
 The server is strict about calendar objects it receives. Besides the requirements specified in RFC 5455 and RFC 4791, this implementation adopts the following rules:
 
 - Calendar objects must have at exactly one toplevel non-timezone component without `RECURRENCE-ID` (the master component).
-- Calendar objects cannot contain `VFREEBUSY` components.
-- Components of type `VJOURNAL` cannot have `RRULE`, `RDATE`, `EXDATE`, or `RECURRENCE-ID` properties.
+- Components of type `VJOURNAL` and `VFREEBUSY` cannot have `RRULE`, `RDATE`, `EXDATE`, or `RECURRENCE-ID` properties.
 - Components of type `VEVENT` and `VTODO` cannot have the `RDATE` property (only `RRULE` and `EXDATE`).
 - Components with `RECURRENCE-ID` set cannot have `RRULE`, `RDATE`, or `EXDATE` properties.
