@@ -5,6 +5,7 @@
 - a single addressbook-home-set (at `"/addressbook/"`)
 - gzip compression of responses
 - supports `expand` calendar-data requests
+- supports `free-busy-query` REPORT requests
 
 ## Running
 
@@ -23,9 +24,10 @@ backend/
 │   └── another-calendar-collection/
 │       ├── another-calendar-object.ics
 │       └── props.xml
-└── addressbook/
-    ├── example-vcard-object.vcf
-    └── props.xml
+├── addressbook/
+│   ├── example-vcard-object.vcf
+│   └── props.xml
+└── me.vcf
 ```
 
 Custom properties for the collections are stored in `props.xml` file, which is initialized by extended `MKCOL` or `MKCALENDAR` commands, and is updated by `PROPPATCH` command.
@@ -104,18 +106,16 @@ server {
 
 ## Compliance with RFC 4791 (caldav)
 
-The implementation tries to be as compliant as is reasonable. There are some points where the server does not follow the RFC. Here is an incomplete list of failures of compliance
+The implementation tries to be as compliant as is reasonable. There are some points where the server does not follow the RFC. Here is an incomplete list of failures of compliance:
 
 - Allows queries with filters whose start and end times are not contained between the `min-date-time` and `max-date-time` properties.
 
-- Does not support the `DAV:expand-property` report. This seems to have pretty niche use cases for the intended application, and I am mystified why it is a MUST in the CalDAV RFC.
-
-- Does not currently support the `CALDAV:free-busy-query` report.
+- Does not support the `DAV:expand-property` report. This seems to have pretty niche use cases for the intended application of a simple calendar server, and I am mystified why it is a MUST in the CalDAV RFC.
 
 - Ignores any collation set information in the text-match XML element, and simply computes:
 ```go
 strings.Contains(strings.ToLower(target_string), strings.ToLower(match_string))
-``` 
+```
 
 ## Compliance with RFC 5455 (icalendar)
 
