@@ -137,7 +137,7 @@ func (data *compData) Intersect(min time.Time, max time.Time) (ok bool) {
 		return false
 	}
 
-	// now try recurrence; safe for unbounded RRULE
+	// now try recurrence; safe-ish for unbounded RRULE
 	return rrule_intersect_helper(min, max, data.rrule, data.duration)
 }
 
@@ -424,7 +424,6 @@ func eventToFreeBusyPeriods(cal *ical.Calendar, location *time.Location, start t
 	jump:
 		t, ok = next()
 	}
-
 }
 
 func freebusyToFreeBusyPeriods(c *ical.Component, start time.Time, end time.Time) (periods []Period, err error) {

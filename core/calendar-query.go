@@ -69,7 +69,7 @@ func CheckCalendarQueryFilterIsValid(query *Query) (err error) {
 }
 
 func MatchCalendarWithQuery(cal *ical.Calendar, query *Query) (bool, error) {
-	if ok, e := matchCompFilterWithComp(query.CalendarFilter.CompFilter, cal.Component, nil, query.Timezone.Location); e != nil {
+	if ok, e := matchCompFilterWithComp(query.CalendarFilter.CompFilter, cal.Component, nil, time.UTC); e != nil {
 		return false, &webDAVerror{
 			Code:      http.StatusForbidden,
 			Condition: &supportedFilterName,

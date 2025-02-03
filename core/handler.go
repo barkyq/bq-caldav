@@ -15,7 +15,8 @@ type Backend interface {
 	PropFind(r *http.Request, pf *PropFind, depth byte) (ms *MultiStatus, err error)
 	PropPatch(r *http.Request, property_update *PropertyUpdate) (ms *MultiStatus, err error)
 	MkCol(r *http.Request, props []Prop) (resp []PropStat, err error)
-	Query(r *http.Request, query *Query, depth byte) (ms *MultiStatus, err error)
+	CalendarQuery(r *http.Request, query *Query, depth byte) (ms *MultiStatus, err error)
+	AddressbookQuery(r *http.Request, query *Query, depth byte) (ms *MultiStatus, err error)
 	Multiget(r *http.Request, multiget *Multiget) (ms *MultiStatus, err error)
 	FBQuery(r *http.Request, fbquery *FBQuery, depth byte) (resp []byte, err error)
 	Options(r *http.Request) (caps []string, allow []string)
@@ -234,7 +235,12 @@ func (h *Handler) handleReport(w http.ResponseWriter, r *http.Request) (err erro
 
 	var ms *MultiStatus
 	if report.Query != nil {
-		ms, err = h.Backend.Query(r, report.Query, depth)
+		switch report.Query.XMLName {
+		case calendarQueryName:
+			ms, err = h.Backend.CalendarQuery(r, report.Query, depth)
+		case addressbookQueryName:
+			ms, err = h.Backend.AddressbookQuery(r, report.Query, depth)
+		}
 	} else if report.Multiget != nil {
 		ms, err = h.Backend.Multiget(r, report.Multiget)
 	} else if report.FBQuery != nil {

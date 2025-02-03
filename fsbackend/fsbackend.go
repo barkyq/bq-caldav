@@ -10,7 +10,6 @@ import (
 	"hash/fnv"
 	"io"
 	"io/fs"
-	"log"
 	"net/http"
 	"os"
 	"path"
@@ -22,16 +21,24 @@ import (
 
 	"github.com/emersion/go-ical"
 	"github.com/emersion/go-vcard"
-	"github.com/gabriel-vasile/mimetype"
 )
 
 type FSBackend struct {
-	create func(p string) (io.WriteCloser, error)
-	mkdir  func(p string) error
-	delete func(p string) error
-	fsys   fs.FS
-	uidmap map[string]string
-	lock   *sync.Mutex
+	create  func(p string) (io.WriteCloser, error)
+	mkdir   func(p string) error
+	delete  func(p string) error
+	fsys    fs.FS
+	uidmap  map[string]string
+	pfcache map[string]*pfCacheData
+	lock    *sync.Mutex
+}
+
+type pfCacheData struct {
+	content_type   string
+	content_length int64
+	modified_time  time.Time
+	etag           string
+	uid_key        string
 }
 
 func NewBackend(location string) *FSBackend {
@@ -43,20 +50,45 @@ func NewBackend(location string) *FSBackend {
 	fsys := os.DirFS(location)
 	br := new(bufio.Reader)
 	uidmap := make(map[string]string)
+	pfcache := make(map[string]*pfCacheData)
+	var content_length int64
+	var content_type string
+	var uid_key string
+	h := fnv.New32a()
 	if e := fs.WalkDir(fsys, ".", func(q string, de fs.DirEntry, err error) error {
 		if err != nil || de.IsDir() || path.Base(q) == "props.xml" {
 			return nil
 		} else if f, e := fsys.Open(q); e != nil {
 			return e
+		} else if fi, e := de.Info(); e != nil {
+			return e
 		} else {
-			br.Reset(f)
+			h.Reset()
+			content_length = 0
+			br.Reset(io.TeeReader(f, h))
 			for {
 				if l, e := br.ReadSlice('\n'); e == nil {
-					if !bytes.HasPrefix(l, []byte("UID:")) {
+					content_length += int64(len(l))
+					if bytes.HasPrefix(l, []byte("BEGIN:VCALENDAR")) {
+						content_type = ical.MIMEType
+					} else if bytes.HasPrefix(l, []byte("BEGIN:VCARD")) {
+						content_type = vcard.MIMEType
+					} else if !bytes.HasPrefix(l, []byte("UID:")) {
 						continue
 					} else if l = bytes.TrimSpace(l[4:]); true {
-						uidmap[fmt.Sprintf("%s:%s", path.Dir(q), l)] = "/" + q
-						return nil
+						uid_key = fmt.Sprintf("%s:%s", path.Dir(q), l)
+						uidmap[uid_key] = "/" + q
+						k, _ := io.Copy(io.Discard, br)
+						content_length += k
+						if content_type != "" {
+							pfcache[q] = &pfCacheData{
+								content_type:   content_type,
+								content_length: content_length,
+								modified_time:  fi.ModTime(),
+								etag:           base32.StdEncoding.EncodeToString(h.Sum(nil))[:7],
+								uid_key:        uid_key,
+							}
+						}
 					}
 				} else {
 					return nil
@@ -66,6 +98,7 @@ func NewBackend(location string) *FSBackend {
 	}); e != nil {
 		panic(e)
 	}
+
 	return &FSBackend{
 		create: func(p string) (io.WriteCloser, error) {
 			return os.Create(path.Join(location, p))
@@ -76,9 +109,10 @@ func NewBackend(location string) *FSBackend {
 		delete: func(p string) error {
 			return os.RemoveAll(path.Join(location, p))
 		},
-		fsys:   os.DirFS(location),
-		uidmap: uidmap,
-		lock:   new(sync.Mutex),
+		fsys:    os.DirFS(location),
+		uidmap:  uidmap,
+		pfcache: pfcache,
+		lock:    new(sync.Mutex),
 	}
 }
 
@@ -100,22 +134,19 @@ func (b *FSBackend) Get(r *http.Request) (body []byte, content_type string, err 
 		return
 	}
 
-	if path.Base(p) == "props.xml" {
-		err = core.WebDAVerror(http.StatusNotFound, nil)
-	} else if fi, e := fs.Stat(b.fsys, p); e != nil {
-		err = core.WebDAVerror(http.StatusNotFound, nil)
-	} else if fi.IsDir() {
-		err = core.WebDAVerror(http.StatusMethodNotAllowed, nil)
-	} else if etag, mt, _, b, e := b.getETagMTCLBody(p); e != nil {
-		// potentially bubble up to internal server error
-		// but probably not
-		log.Println("unexpected error: ", e.Error())
-		err = e
-	} else if e := core.IfMatchifNoneMatch(etag, r.Header.Get("If-Match"), r.Header.Get("If-None-Match")); e != nil {
+	err = core.WebDAVerror(http.StatusNotFound, nil)
+	if cache_data, ok := b.pfcache[p]; !ok {
+		//
+	} else if f, e := b.fsys.Open(p); e != nil {
+		//
+	} else if b, e := io.ReadAll(f); e != nil {
+		//
+	} else if e := core.IfMatchifNoneMatch(cache_data.etag, r.Header.Get("If-Match"), r.Header.Get("If-None-Match")); e != nil {
 		err = e
 	} else {
-		content_type = mt.String()
+		content_type = cache_data.content_type
 		body = b
+		err = nil
 	}
 	return
 }
@@ -138,7 +169,7 @@ jump:
 	if e := vcard.NewEncoder(buf).Encode(me); e != nil {
 		panic(e)
 	}
-	return buf.Bytes(), "text/vcard"
+	return buf.Bytes(), vcard.MIMEType
 }
 
 // DELETE
@@ -147,26 +178,20 @@ func (b *FSBackend) Delete(r *http.Request) (err error) {
 	defer b.lock.Unlock()
 
 	p := path.Clean(r.URL.Path)[1:]
-	if fi, e := fs.Stat(b.fsys, p); e != nil || path.Base(p) == "props.xml" {
+
+	if cache_data, ok := b.pfcache[p]; !ok {
+		return core.WebDAVerror(http.StatusNotFound, nil)
+	} else if fi, e := fs.Stat(b.fsys, p); e != nil {
 		return core.WebDAVerror(http.StatusNotFound, nil)
 	} else if fi.IsDir() {
 		return b.delete(p)
-	} else if etag, _, _, current_body, e := b.getETagMTCLBody(p); e != nil {
-		return e
-	} else if e := core.IfMatchifNoneMatch(etag, r.Header.Get("If-Match"), r.Header.Get("If-None-Match")); e != nil {
+	} else if e := core.IfMatchifNoneMatch(cache_data.etag, r.Header.Get("If-Match"), r.Header.Get("If-None-Match")); e != nil {
 		return err
 	} else if e := b.delete(p); e != nil {
 		return e
 	} else {
-		// delete from uidmap if it is a UID object
-		if s := bytes.Index(current_body, []byte("UID:")); s == -1 {
-			// do nothing
-		} else if t := bytes.Index(current_body[s+4:], []byte{'\r', '\n'}); t == -1 {
-			// do nothing
-		} else {
-			// delete from uidmap
-			delete(b.uidmap, fmt.Sprintf("%s:%s", path.Dir(p), current_body[s+4:s+4+t]))
-		}
+		delete(b.uidmap, cache_data.uid_key)
+		delete(b.pfcache, p)
 	}
 	return nil
 }
@@ -265,11 +290,12 @@ func (b *FSBackend) checkCalendarObject(r *http.Request, p string, cal *ical.Cal
 		return nil, e
 	}
 
-	etag, mt, _, current_body, _ := b.getETagMTCLBody(p)
-	// don't bother checking the error; etag == "" if the file does not exist
+	cache_data, cache_ok := b.pfcache[p]
 
-	if e := core.IfMatchifNoneMatch(etag, r.Header.Get("If-Match"), r.Header.Get("If-None-Match")); e != nil {
-		return nil, e
+	if cache_ok {
+		if e := core.IfMatchifNoneMatch(cache_data.etag, r.Header.Get("If-Match"), r.Header.Get("If-None-Match")); e != nil {
+			return nil, e
+		}
 	}
 
 	// check additional caldav preconditions
@@ -281,17 +307,19 @@ func (b *FSBackend) checkCalendarObject(r *http.Request, p string, cal *ical.Cal
 	if err != nil {
 		return nil, err
 	}
+	// todo: rewrite floating times using loc
 
-	// should pass calendar-timezone if it exists instead of `nil`
 	if md, e := core.ParseCalendarObjectResource(cal, loc); e != nil {
 		return nil, e
 	} else if e := core.CheckCalendarCompIsSupported(collection_prop, md.ComponentType); e != nil {
 		return nil, e
 	} else if uid, e := md.GetUID(); e != nil {
 		return nil, e
-	} else if v, ok := b.uidmap[path.Dir(p)+":"+uid]; ok && v != r.URL.Path {
+	} else if uid_key := path.Dir(p) + ":" + uid; false {
+		//
+	} else if v, ok := b.uidmap[uid_key]; ok && v != r.URL.Path {
 		return nil, &core.UidConflict{Scope: core.CalendarScope, Href: core.Href{Target: v}}
-	} else if d := bytes.Index(current_body, []byte(uid)); mt != nil && mt.Is(ical.MIMEType) && d == -1 {
+	} else if cache_ok && cache_data.uid_key != uid_key {
 		return nil, &core.UidConflict{Scope: core.CalendarScope, Href: core.Href{Target: r.URL.Path}}
 	} else if e := ical.NewEncoder(buf).Encode(cal); e != nil {
 		return nil, core.WebDAVerror(http.StatusInternalServerError, nil)
@@ -300,6 +328,15 @@ func (b *FSBackend) checkCalendarObject(r *http.Request, p string, cal *ical.Cal
 	} else if e := core.CheckOtherCalendarPreconditions(collection_prop, md); e != nil {
 		return nil, e
 	} else {
+		h := fnv.New32a()
+		h.Write(buf.Bytes())
+		b.pfcache[p] = &pfCacheData{
+			content_type:   ical.MIMEType,
+			content_length: int64(buf.Len()),
+			modified_time:  time.Now(),
+			etag:           base32.StdEncoding.EncodeToString(h.Sum(nil))[:7],
+			uid_key:        uid_key,
+		}
 		b.uidmap[path.Dir(p)+":"+uid] = r.URL.Path
 	}
 
@@ -310,11 +347,14 @@ func (b *FSBackend) checkAddressObject(r *http.Request, p string, card vcard.Car
 	// if `if-match` or `if-none-match` fails return 412 precondition failed
 	// https://datatracker.ietf.org/doc/html/rfc7232
 	//
-	etag, mt, _, current_body, _ := b.getETagMTCLBody(p)
 	// don't bother checking the error; etag == "" if the file does not exist
 
-	if e := core.IfMatchifNoneMatch(etag, r.Header.Get("If-Match"), r.Header.Get("If-None-Match")); e != nil {
-		return nil, e
+	cache_data, cache_ok := b.pfcache[p]
+
+	if cache_ok {
+		if e := core.IfMatchifNoneMatch(cache_data.etag, r.Header.Get("If-Match"), r.Header.Get("If-None-Match")); e != nil {
+			return nil, e
+		}
 	}
 
 	collection_prop := &core.Prop{}
@@ -330,15 +370,26 @@ func (b *FSBackend) checkAddressObject(r *http.Request, p string, card vcard.Car
 		panic("vcard is missing UID")
 	} else if uid := f.Value; false {
 		//
-	} else if v, ok := b.uidmap[path.Dir(p)+":"+uid]; ok && v != r.URL.Path {
+	} else if uid_key := path.Dir(p) + ":" + uid; false {
+		//
+	} else if v, ok := b.uidmap[uid_key]; ok && v != r.URL.Path {
 		return nil, &core.UidConflict{Scope: core.AddressbookScope, Href: core.Href{Target: v}}
-	} else if d := bytes.Index(current_body, []byte(uid)); mt != nil && mt.Is(vcard.MIMEType) && d == -1 {
+	} else if cache_ok && cache_data.uid_key != uid_key {
 		return nil, &core.UidConflict{Scope: core.AddressbookScope, Href: core.Href{Target: r.URL.Path}}
 	} else if e := vcard.NewEncoder(buf).Encode(card); e != nil {
 		return nil, core.WebDAVerror(http.StatusInternalServerError, nil)
 	} else if e := core.CheckMaxResourceSize(collection_prop, uint64(buf.Len())); e != nil {
 		return nil, e
 	} else {
+		h := fnv.New32a()
+		h.Write(buf.Bytes())
+		b.pfcache[p] = &pfCacheData{
+			content_type:   vcard.MIMEType,
+			content_length: int64(buf.Len()),
+			modified_time:  time.Now(),
+			etag:           base32.StdEncoding.EncodeToString(h.Sum(nil))[:7],
+			uid_key:        uid_key,
+		}
 		b.uidmap[path.Dir(p)+":"+uid] = r.URL.Path
 	}
 
@@ -392,8 +443,8 @@ func (b *FSBackend) PropFind(r *http.Request, pf *core.PropFind, depth byte) (ms
 	}
 	if stat, e := fs.Stat(b.fsys, p); e != nil {
 		return nil, core.WebDAVerror(http.StatusNotFound, nil)
-	} else if !stat.IsDir() || depth == 0 {
-		if resp, e := b.propFindResource(p, stat, pf); e != nil {
+	} else if isDir := stat.IsDir(); !isDir || depth == 0 {
+		if resp, e := b.propFindResource(p, isDir, pf); e != nil {
 			return nil, e
 		} else {
 			ms.Responses = []core.Response{*resp}
@@ -404,9 +455,7 @@ func (b *FSBackend) PropFind(r *http.Request, pf *core.PropFind, depth byte) (ms
 	err = fs.WalkDir(b.fsys, p, func(q string, de fs.DirEntry, err error) error {
 		if err != nil {
 			return nil
-		} else if fi, e := de.Info(); e != nil {
-			return nil
-		} else if resp, e := b.propFindResource(q, fi, pf); e != nil {
+		} else if resp, e := b.propFindResource(q, de.IsDir(), pf); e != nil {
 			if !errors.Is(e, &notFound{}) {
 				return e
 			} else {
@@ -425,12 +474,12 @@ func (b *FSBackend) PropFind(r *http.Request, pf *core.PropFind, depth byte) (ms
 	return
 }
 
-func (b *FSBackend) propFindResource(p string, fi fs.FileInfo, pf *core.PropFind) (resp *core.Response, err error) {
+func (b *FSBackend) propFindResource(p string, isDir bool, pf *core.PropFind) (resp *core.Response, err error) {
 	var props_Found []core.Any
-	if fi.IsDir() {
+	if isDir {
 		props_Found, err = b.propFindDir(p)
 	} else {
-		props_Found, _, err = b.propFindFile(p, fi)
+		props_Found, err = b.propFindFile(p)
 	}
 	if err != nil {
 		return
@@ -492,141 +541,150 @@ func (b *FSBackend) propFindDir(p string) (props_Found []core.Any, err error) {
 	return
 }
 
-func (b *FSBackend) getETagMTCLBody(p string) (etag string, mt *mimetype.MIME, content_length int64, body []byte, err error) {
-	buf := bytes.NewBuffer(nil)
-
-	if f, e := b.fsys.Open(p); e != nil {
-		err = &notFound{}
-		return
-	} else {
-		h := fnv.New32a()
-		if n, e := io.Copy(buf, io.TeeReader(f, h)); e != nil {
-			err = e
-			return
-		} else if e := f.Close(); e != nil {
-			err = e
-			return
-		} else {
-			content_length = n
-		}
-		etag = base32.StdEncoding.EncodeToString(h.Sum(nil))[:7]
+func (b *FSBackend) propFindFile(p string) (props_Found []core.Any, err error) {
+	cache_data, ok := b.pfcache[p]
+	if !ok {
+		return nil, &notFound{}
 	}
-	mt = mimetype.Detect(buf.Bytes())
-	body = buf.Bytes()
+	props_Found = core.DefaultPropsFile(cache_data.content_type, cache_data.content_length, cache_data.modified_time, cache_data.etag)
 	return
 }
 
-func (b *FSBackend) propFindFile(p string, fi fs.FileInfo) (props_Found []core.Any, body []byte, err error) {
-	if path.Base(p) == "props.xml" {
-		return nil, nil, &notFound{}
-	}
-
-	var etag string
-	var mt_string string
-	var content_length int64
-	if et, mt, cl, br, e := b.getETagMTCLBody(p); e != nil {
-		err = e
-		return
-	} else {
-		etag = et
-		content_length = cl
-		mt_string = mt.String()
-		body = br
-	}
-	props_Found = core.DefaultPropsFile(mt_string, content_length, fi.ModTime(), etag)
-	return
-}
-
-// REPORT calendar-query or addressbook-query
-func (b *FSBackend) Query(r *http.Request, query *core.Query, depth byte) (ms *core.MultiStatus, err error) {
-	query_scope := query.Scope()
+// REPORT calendar-query
+func (b *FSBackend) CalendarQuery(r *http.Request, query *core.Query, depth byte) (ms *core.MultiStatus, err error) {
 	p := path.Clean(r.URL.Path)[1:]
 	if p == "" {
 		p = "."
 	}
+
+	ms = &core.MultiStatus{}
+
+	var query_root bool
+	if path_comps := strings.Split(p, "/"); false {
+	} else if path_comps[0] != "calendars" {
+		err = core.WebDAVerror(http.StatusBadRequest, nil)
+		return
+	} else if len(path_comps) == 1 {
+		if depth == 0 {
+			// empty multistatus
+			return
+		} else {
+			query_root = true
+		}
+	} else if len(path_comps) == 2 {
+		//
+	} else if len(path_comps) > 2 {
+		err = core.WebDAVerror(http.StatusMethodNotAllowed, nil)
+		return
+	}
+
+	// depth is functionally infinite at this stage
+	// proceed
+
+	if e := core.CheckCalendarQueryFilterIsValid(query); e != nil {
+		err = e
+		return
+	} else if cd, e := core.ParseCalendarData(query); e != nil {
+		err = e
+		return
+	} else {
+		query.CalendarData = cd
+	}
+
 	b.lock.Lock()
 	defer b.lock.Unlock()
 
-	switch getScope(r.URL.Path) {
-	case core.CalendarScope:
-		if query_scope != core.CalendarScope {
-			err = core.WebDAVerror(http.StatusBadRequest, nil)
-			return
-		} else if e := core.CheckCalendarQueryFilterIsValid(query); e != nil {
-			err = e
-			return
-		} else if query.Timezone == nil {
-			// need to get timezone
-			err = core.WebDAVerror(http.StatusMethodNotAllowed, nil)
-			var propsdotxmlpath string
-			if d := len(strings.Split(p, "/")); d == 2 {
-				propsdotxmlpath = path.Join(p, "props.xml")
-			} else if d == 3 {
-				propsdotxmlpath = path.Join(path.Dir(p), "props.xml")
-			} else {
-				return
-			}
-			err = core.WebDAVerror(http.StatusInternalServerError, nil)
-			collection_prop := &core.Prop{}
-			if pf, e := b.fsys.Open(propsdotxmlpath); e != nil {
-				return
-			} else if e := xml.NewDecoder(pf).Decode(collection_prop); e != nil {
-				return
-			} else if loc, e := core.GetLocationFromProp(collection_prop); e != nil {
-				return
-			} else {
-				err = nil
-				query.Timezone = &core.Timezone{Location: loc}
-			}
-		}
-		if cd, e := core.ParseCalendarData(query); e != nil {
-			err = e
+	resps := make([]core.Response, 0, 128)
+	if !query_root {
+		resps, err = b.queryCalendarCollection(p, query, resps)
+		ms.Responses = resps
+		return
+	} else {
+		// query_root
+		if des, e := fs.ReadDir(b.fsys, p); e != nil {
+			// could not read, so empty response
 			return
 		} else {
-			query.CalendarData = cd
+			for _, de := range des {
+				if !de.IsDir() {
+					continue
+				} else if new_resps, e := b.queryCalendarCollection(path.Join(p, de.Name()), query, resps); e != nil {
+					err = e
+					return
+				} else {
+					resps = new_resps
+				}
+			}
 		}
-	case core.AddressbookScope:
-		if query_scope != core.AddressbookScope || query.AddressbookFilter == nil {
-			err = core.WebDAVerror(http.StatusBadRequest, nil)
-			return
-		} else if ad, e := core.ParseAddressData(query); e != nil {
-			err = e
-			return
-		} else {
-			query.AddressData = ad
-		}
+		ms.Responses = resps
+		return
 	}
-	ms = &core.MultiStatus{}
+}
 
-	if fi, e := fs.Stat(b.fsys, p); e != nil {
-		// empty return means empty multistatus
-		// which is the expected behavior
+func (b *FSBackend) queryCalendarCollection(q string, query *core.Query, resps []core.Response) (new_resps []core.Response, err error) {
+	if des, e := fs.ReadDir(b.fsys, q); e != nil {
+		// could not read, so empty response
 		return
-	} else if fi.IsDir() && depth == 0 {
-		return
-	} else if depth == 0 {
-		if resp, match, e := b.queryFile(p, fi, query); !match || e != nil {
-			if !errors.Is(e, &notFound{}) {
-				// this could return a not-implemented error
-				// if the client tries a not-implemented query
+	} else {
+		for _, de := range des {
+			if de.IsDir() {
+				continue
+			} else if r, m, e := b.queryFile(path.Join(q, de.Name()), query); !m || errors.Is(e, &notFound{}) {
+				continue
+			} else if e != nil {
 				err = e
+				return
+			} else {
+				resps = append(resps, *r)
 			}
-			return
-		} else {
-			ms.Responses = []core.Response{*resp}
-			return
 		}
 	}
+	new_resps = resps
+	return
+}
+
+func (b *FSBackend) AddressbookQuery(r *http.Request, query *core.Query, depth byte) (ms *core.MultiStatus, err error) {
+	p := path.Clean(r.URL.Path)[1:]
+	if p == "" {
+		p = "."
+	}
+
+	if path_comps := strings.Split(p, "/"); false {
+	} else if path_comps[0] != "addressbook" {
+		err = core.WebDAVerror(http.StatusBadRequest, nil)
+		return
+	} else if len(path_comps) == 1 {
+		if depth == 0 {
+			// empty multistatus
+			return
+		}
+	} else if len(path_comps) == 2 {
+		//
+	} else if len(path_comps) > 2 {
+		err = core.WebDAVerror(http.StatusMethodNotAllowed, nil)
+		return
+	}
+
+	if query.AddressbookFilter == nil {
+		err = core.WebDAVerror(http.StatusBadRequest, nil)
+		return
+	} else if ad, e := core.ParseAddressData(query); e != nil {
+		err = e
+		return
+	} else {
+		query.AddressData = ad
+	}
+
+	b.lock.Lock()
+	defer b.lock.Unlock()
+
+	ms = &core.MultiStatus{}
 
 	resps := make([]core.Response, 0, 128)
 	err = fs.WalkDir(b.fsys, p, func(q string, de fs.DirEntry, err error) error {
-		if depth == 1 && de.IsDir() && len(p) < len(q) {
-			return fs.SkipDir
-		} else if err != nil || de.IsDir() {
+		if err != nil || de.IsDir() {
 			return nil
-		} else if fi, e := de.Info(); e != nil {
-			return nil
-		} else if resp, match, e := b.queryFile(q, fi, query); e != nil || !match {
+		} else if resp, match, e := b.queryFile(q, query); e != nil || !match {
 			if !errors.Is(e, &notFound{}) {
 				return e
 			}
@@ -647,20 +705,21 @@ func (b *FSBackend) Query(r *http.Request, query *core.Query, depth byte) (ms *c
 	return
 }
 
-func (b *FSBackend) queryFile(p string, fi fs.FileInfo, query *core.Query) (resp *core.Response, match bool, err error) {
-	var file io.Reader
+func (b *FSBackend) queryFile(p string, query *core.Query) (resp *core.Response, match bool, err error) {
 	var props_Found []core.Any
-	if pf, f, e := b.propFindFile(p, fi); e != nil {
+	if pf, e := b.propFindFile(p); e != nil {
 		err = e
 		return
 	} else {
-		file = bytes.NewBuffer(f)
 		props_Found = pf
 	}
 	switch query.Scope() {
 	case core.CalendarScope:
 		// now check if the file matches the query
-		if cal, e := ical.NewDecoder(file).Decode(); e != nil {
+		if file, e := b.fsys.Open(p); e != nil {
+			err = &notFound{}
+			return
+		} else if cal, e := ical.NewDecoder(file).Decode(); e != nil {
 			err = core.WebDAVerror(http.StatusInternalServerError, nil)
 			return
 		} else if m, e := core.MatchCalendarWithQuery(cal, query); e != nil {
@@ -671,7 +730,7 @@ func (b *FSBackend) queryFile(p string, fi fs.FileInfo, query *core.Query) (resp
 			// did not match
 			err = &notFound{}
 			return
-		} else if a, e := core.CalendarData(cal, query.CalendarData, query.Timezone.Location); e != nil {
+		} else if a, e := core.CalendarData(cal, query.CalendarData, time.UTC); e != nil {
 			// internal server error or webdav not-implemented
 			err = e
 			return
@@ -679,8 +738,10 @@ func (b *FSBackend) queryFile(p string, fi fs.FileInfo, query *core.Query) (resp
 			props_Found = append(props_Found, *a)
 		}
 	case core.AddressbookScope:
-		// todo: filter via query
-		if card, e := vcard.NewDecoder(file).Decode(); e != nil {
+		if file, e := b.fsys.Open(p); e != nil {
+			err = &notFound{}
+			return
+		} else if card, e := vcard.NewDecoder(file).Decode(); e != nil {
 			err = e
 			return
 		} else if m := core.MatchCardWithQuery(card, query); !m {
@@ -729,30 +790,6 @@ func (b *FSBackend) Multiget(r *http.Request, multiget *core.Multiget) (ms *core
 			err = core.WebDAVerror(http.StatusBadRequest, nil)
 			return
 		}
-		if multiget.Timezone == nil {
-			// need to get timezone
-			err = core.WebDAVerror(http.StatusMethodNotAllowed, nil)
-			var propsdotxmlpath string
-			if d := len(strings.Split(p, "/")); d == 2 {
-				propsdotxmlpath = path.Join(p, "props.xml")
-			} else if d == 3 {
-				propsdotxmlpath = path.Join(path.Dir(p), "props.xml")
-			} else {
-				return
-			}
-			err = core.WebDAVerror(http.StatusInternalServerError, nil)
-			collection_prop := &core.Prop{}
-			if pf, e := b.fsys.Open(propsdotxmlpath); e != nil {
-				return
-			} else if e := xml.NewDecoder(pf).Decode(collection_prop); e != nil {
-				return
-			} else if loc, e := core.GetLocationFromProp(collection_prop); e != nil {
-				return
-			} else {
-				err = nil
-				multiget.Timezone = &core.Timezone{Location: loc}
-			}
-		}
 		if cd, e := core.ParseCalendarData(multiget); e != nil {
 			err = e
 			return
@@ -777,7 +814,7 @@ func (b *FSBackend) Multiget(r *http.Request, multiget *core.Multiget) (ms *core
 	if fi, e := fs.Stat(b.fsys, p); e != nil {
 		return
 	} else if !fi.IsDir() {
-		if resp, e := b.multigetFile(p, fi, multiget); e != nil {
+		if resp, e := b.multigetFile(p, multiget); e != nil {
 			goto jump
 		} else {
 			resps = []core.Response{*resp}
@@ -790,9 +827,7 @@ func (b *FSBackend) Multiget(r *http.Request, multiget *core.Multiget) (ms *core
 	fs.WalkDir(b.fsys, p, func(q string, de fs.DirEntry, err error) error {
 		if err != nil || de.IsDir() {
 			return nil
-		} else if fi, e := de.Info(); e != nil {
-			return nil
-		} else if resp, e := b.multigetFile(q, fi, multiget); e != nil {
+		} else if resp, e := b.multigetFile(q, multiget); e != nil {
 			return nil
 		} else {
 			resps = append(resps, *resp)
@@ -804,7 +839,7 @@ jump:
 	return
 }
 
-func (b *FSBackend) multigetFile(p string, fi fs.FileInfo, multiget *core.Multiget) (resp *core.Response, err error) {
+func (b *FSBackend) multigetFile(p string, multiget *core.Multiget) (resp *core.Response, err error) {
 	for _, href := range multiget.Hrefs {
 		if path.Clean(href.Target)[1:] == p {
 			goto jump
@@ -812,30 +847,34 @@ func (b *FSBackend) multigetFile(p string, fi fs.FileInfo, multiget *core.Multig
 	}
 	return nil, &notFound{}
 jump:
-	var file io.Reader
 	var props_Found []core.Any
-	if pf, f, e := b.propFindFile(p, fi); e != nil {
+	if pf, e := b.propFindFile(p); e != nil {
 		err = e
 		return
 	} else {
-		file = bytes.NewBuffer(f)
 		props_Found = pf
 	}
 
 	switch multiget.Scope() {
 	case core.CalendarScope:
 		// now write calendar-data
-		if cal, e := ical.NewDecoder(file).Decode(); e != nil {
+		if file, e := b.fsys.Open(p); e != nil {
 			err = &notFound{}
 			return
-		} else if a, e := core.CalendarData(cal, multiget.CalendarData, multiget.Timezone.Location); e != nil {
+		} else if cal, e := ical.NewDecoder(file).Decode(); e != nil {
+			err = &notFound{}
+			return
+		} else if a, e := core.CalendarData(cal, multiget.CalendarData, time.UTC); e != nil {
 			err = e
 			return
 		} else if a != nil {
 			props_Found = append(props_Found, *a)
 		}
 	case core.AddressbookScope:
-		if card, e := vcard.NewDecoder(file).Decode(); e != nil {
+		if file, e := b.fsys.Open(p); e != nil {
+			err = &notFound{}
+			return
+		} else if card, e := vcard.NewDecoder(file).Decode(); e != nil {
 			err = &notFound{}
 			return
 		} else if a, e := core.AddressData(card, multiget.AddressData); e != nil {
@@ -864,11 +903,11 @@ jump:
 
 // FBQuery
 func (b *FSBackend) FBQuery(r *http.Request, fbquery *core.FBQuery, depth byte) (resp []byte, err error) {
-	// with this implementation, REPORT must be targeting /calendars/X
+	// with this implementation, REPORT must be targeting /calendars/ or /calendars/X
 	p := path.Clean(r.URL.Path[1:])
-	if elements := strings.Split(p, "/"); len(elements) == 3 {
+	if elements := strings.Split(p, "/"); len(elements) > 2 {
 		err = core.WebDAVerror(http.StatusForbidden, nil)
-	} else if len(elements) < 2 {
+	} else if elements == nil || elements[0] != "calendars" {
 		err = core.WebDAVerror(http.StatusMethodNotAllowed, nil)
 	} else if fi, e := fs.Stat(b.fsys, p); e != nil {
 		err = core.WebDAVerror(http.StatusNotFound, nil)
@@ -886,7 +925,7 @@ func (b *FSBackend) FBQuery(r *http.Request, fbquery *core.FBQuery, depth byte) 
 			return file.Close()
 		} else if e := file.Close(); e != nil {
 			return e
-		} else if ps, e := core.FBQueryObject(cal, time.Local, fbquery, periods); e != nil {
+		} else if ps, e := core.FBQueryObject(cal, time.UTC, fbquery, periods); e != nil {
 			return e
 		} else {
 			periods = ps
@@ -925,21 +964,21 @@ func (b *FSBackend) Options(r *http.Request) (caps []string, allow []string) {
 		caps = []string{"1", "3", "calendar-access", "extended-mkcol"}
 		switch len(components) {
 		case 1: // path targets /calendars
-			allow = []string{http.MethodOptions, "PROPFIND"}
+			allow = []string{http.MethodOptions, "PROPFIND", "REPORT"}
 		case 2: // path targets /calendars/X
 			allow = []string{http.MethodOptions, "PROPFIND", "REPORT", "PROPPATCH", "MKCOL", "MKCALENDAR", "DELETE"}
 		case 3: // path targets /calendars/X/Y
-			allow = []string{http.MethodOptions, "PROPFIND", "REPORT", "DELETE", "PUT", "GET", "HEAD"}
+			allow = []string{http.MethodOptions, "PROPFIND", "DELETE", "PUT", "GET", "HEAD"}
 		}
 	} else if components[0] == "addressbook" {
 		caps = []string{"1", "3", "addressbook", "extended-mkcol"}
 		switch len(components) {
 		case 1: // path targets /addressbook
-			allow = []string{http.MethodOptions, "PROPFIND"}
+			allow = []string{http.MethodOptions, "PROPFIND", "REPORT"}
 		case 2: // path targets /addressbook/X
 			allow = []string{http.MethodOptions, "PROPFIND", "REPORT", "PROPPATCH", "MKCOL", "DELETE"}
 		case 3: // path targets /addressbook/X/Y
-			allow = []string{http.MethodOptions, "PROPFIND", "REPORT", "DELETE", "PUT", "GET", "HEAD"}
+			allow = []string{http.MethodOptions, "PROPFIND", "DELETE", "PUT", "GET", "HEAD"}
 		}
 	}
 	return
