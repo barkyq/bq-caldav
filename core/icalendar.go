@@ -3,6 +3,7 @@ package core
 import (
 	"bytes"
 	"fmt"
+	"io"
 	"net/http"
 	"sort"
 	"strconv"
@@ -561,6 +562,25 @@ func parseTodo(comp *ical.Component) (data *compData, err error) {
 			data.dtstart = t
 			data.start_name = ical.PropDateTimeStart
 		}
+		if val := comp.Props.Get(ical.PropRecurrenceRule); val != nil {
+			if r, e := rrule.StrToRRule(fmt.Sprintf("%s:%s\n%s:%s",
+				"DTSTART",
+				data.dtstart.In(time.UTC).Format(dateWithUTCTimeFormat),
+				"RRULE",
+				val.Value,
+			)); e != nil {
+				return
+			} else {
+				data.rrule = r
+			}
+		} else if val := comp.Props.Get(ical.PropRecurrenceID); val != nil {
+			if t, e := val.DateTime(nil); e != nil {
+				err = e
+				return
+			} else {
+				data.recurrenceid = t
+			}
+		}
 	}
 
 	// get due OR duration
@@ -589,28 +609,6 @@ func parseTodo(comp *ical.Component) (data *compData, err error) {
 		} else {
 			data.duration = d
 			data.end_name = ical.PropDuration
-		}
-	}
-
-	if !data.dtstart.IsZero() {
-		if val := comp.Props.Get(ical.PropRecurrenceRule); val != nil {
-			if r, e := rrule.StrToRRule(fmt.Sprintf("%s:%s\n%s:%s",
-				"DTSTART",
-				data.dtstart.In(time.UTC).Format(dateWithUTCTimeFormat),
-				"RRULE",
-				val.Value,
-			)); e != nil {
-				return
-			} else {
-				data.rrule = r
-			}
-		} else if val := comp.Props.Get(ical.PropRecurrenceID); val != nil {
-			if t, e := val.DateTime(nil); e != nil {
-				err = e
-				return
-			} else {
-				data.recurrenceid = t
-			}
 		}
 	} else {
 		// dtstart was not set yet; assume completed/created handling
@@ -739,8 +737,14 @@ func GetStartUntilUnbounded(metadata *CalendarMetaData) (start time.Time, until 
 					until_time, e = time.ParseInLocation(dateTimeFormat, before, time.UTC)
 				case len(dateFormat):
 					until_time, e = time.ParseInLocation(dateFormat, before, time.UTC)
+				default:
+					e = fmt.Errorf("UNTIL must be date with UTC time!")
 				}
 				if e != nil {
+					err = &webDAVerror{
+						Code:      http.StatusForbidden,
+						Condition: &validCalendarObjectResourceName,
+					}
 					return
 				}
 				if t := until_time.Add(c.duration); until.IsZero() {
@@ -856,6 +860,8 @@ func parseExDates(comp *ical.Component) (exdates []time.Time, err error) {
 						return
 					}
 				} else {
+					// could be floating time in which case it is parsed in UTC
+					// not ideal...
 					if t, e := time.ParseInLocation(dateTimeFormat, s, location); e == nil {
 						exdates = append(exdates, t)
 					} else {
@@ -957,4 +963,156 @@ func DoesAlarmIntersect(alarm *ical.Component, parent *ical.Component, start tim
 		}
 		return false, nil
 	}
+}
+
+// put helper
+func CheckCalendarObjectSupportedAndValid(request_body io.Reader) (cal *ical.Calendar, err error) {
+	err = &webDAVerror{
+		Code:      http.StatusForbidden,
+		Condition: &validCalendarDataName,
+	}
+
+	if c, e := ical.NewDecoder(request_body).Decode(); e != nil {
+		return
+	} else {
+		cal = c
+	}
+
+	if methodp := cal.Props.Get(ical.PropMethod); methodp != nil {
+		return
+	}
+
+	for _, child := range cal.Children {
+		if val := child.Props.Get(ical.PropRecurrenceDates); val != nil {
+			return
+		}
+		switch child.Name {
+		case ical.CompJournal, ical.CompFreeBusy:
+			// Journals cannot be recurring
+			if val := child.Props.Get(ical.PropRecurrenceRule); val != nil {
+				return
+			} else if val := child.Props.Get(ical.PropRecurrenceDates); val != nil {
+				return
+			} else if val := child.Props.Get(ical.PropExceptionDates); val != nil {
+				return
+			} else if val := child.Props.Get(ical.PropRecurrenceID); val != nil {
+				return
+			}
+		case ical.CompEvent, ical.CompToDo:
+			if val := child.Props.Get(ical.PropRecurrenceID); val == nil {
+				//
+			} else if param := val.Params.Get("RANGE"); param == "THISANDFUTURE" {
+				return
+			}
+		}
+		if child.Name == ical.CompToDo {
+			if val := child.Props.Get(ical.PropCompleted); val == nil {
+				//
+			} else if len(val.Value) != len(dateWithUTCTimeFormat) {
+				return
+			}
+		}
+
+		for _, subchild := range child.Children {
+			switch subchild.Name {
+			case ical.CompAlarm:
+				if child.Name != ical.CompEvent && child.Name != ical.CompToDo {
+					return
+				} else if _, e := DoesAlarmIntersect(subchild, child, time.Now(), time.Time{}); e != nil {
+					// check all alarms can be used
+					return
+				}
+			case ical.CompTimezoneDaylight, ical.CompTimezoneStandard:
+				if child.Name != ical.CompTimezone {
+					return
+				}
+			}
+		}
+	}
+
+	err = nil
+	return
+}
+
+var rewrite_floating_times []string = []string{ical.PropDateTimeStart, ical.PropDateTimeEnd, ical.PropDue, ical.PropRecurrenceID, ical.PropExceptionDates}
+
+func RewriteFloatingTimes(cal *ical.Calendar, tz *ical.Component) (rewritten bool, err error) {
+	if tz == nil {
+		// nothing to do
+		return
+	}
+
+	err = &webDAVerror{
+		Code:      http.StatusForbidden,
+		Condition: &validCalendarObjectResourceName,
+	}
+
+	var master *ical.Component
+	rescheds := make([]*ical.Component, 0, len(cal.Children))
+	var tzid string
+	var tz_found bool
+	if v := tz.Props.Get(ical.PropTimezoneID); v == nil {
+		return
+	} else {
+		tzid = v.Value
+	}
+	for _, c := range cal.Children {
+		switch c.Name {
+		case ical.CompTimezone:
+			if v := tz.Props.Get(ical.PropTimezoneID); v == nil {
+				return
+			} else if tzid == v.Value {
+				tz_found = true
+			}
+			continue
+		}
+		if v := c.Props.Get(ical.PropRecurrenceID); v == nil {
+			master = c
+		} else {
+			rescheds = append(rescheds, c)
+		}
+	}
+
+	var nodstart bool
+	if v := master.Props.Get(ical.PropDateTimeStart); v == nil {
+		nodstart = true
+	} else if v.Params.Get(ical.ParamTimezoneID) != "" {
+		//
+	} else if len(v.Value) != len(dateTimeFormat) {
+		//
+	} else {
+		rewritten = true
+	}
+
+	rescheds = append(rescheds, master)
+
+	for _, c := range rescheds {
+		for _, s := range rewrite_floating_times {
+			if v := c.Props.Get(s); v == nil {
+				continue
+			} else if v.Params.Get(ical.ParamTimezoneID) != "" {
+				if rewritten {
+					return
+				}
+			} else if len(v.Value) != len(dateTimeFormat) {
+				if rewritten {
+					return
+				}
+			} else {
+				if !rewritten {
+					return
+				}
+				v.Params.Set(ical.ParamTimezoneID, tzid)
+			}
+			if rewritten && nodstart {
+				return
+			}
+		}
+	}
+
+	if rewritten && !tz_found {
+		cal.Children = append(cal.Children, tz)
+	}
+	err = nil
+	return
 }

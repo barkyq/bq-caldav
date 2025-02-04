@@ -103,16 +103,47 @@ func NewBackend(root string) *FSBackend {
 		panic(e)
 	}
 
+	tzs := make(map[string]*ical.Component)
+	if des, e := fs.ReadDir(fsys, "calendars"); e != nil {
+		panic(e)
+	} else {
+		for _, de := range des {
+			if !de.IsDir() {
+				continue
+			}
+			cprop := &core.Prop{}
+			if pxml, e := fsys.Open(path.Join("calendars", de.Name(), "props.xml")); e != nil {
+				panic(e)
+			} else if e := xml.NewDecoder(pxml).Decode(cprop); e != nil {
+				panic(e)
+			} else if tz, e := core.GetTimezoneFromProp(cprop); e != nil {
+				panic(e)
+			} else {
+				tzs[path.Join("calendars", de.Name())] = tz
+			}
+		}
+	}
+
+	// this loads the cache, and acts as a test of the server
 	for k, v := range pfcache {
 		if v.content_type != ical.MIMEType {
 			continue
 		} else if f, e := fsys.Open(k); e != nil {
+			println(k)
 			panic(e)
 		} else if cal, e := core.CheckCalendarObjectSupportedAndValid(f); e != nil {
+			println(k)
 			panic(e)
+		} else if rewritten, e := core.RewriteFloatingTimes(cal, tzs[path.Dir(k)]); e != nil {
+			println(k)
+			panic(e)
+		} else if rewritten {
+			panic(k)
 		} else if md, e := core.ParseCalendarObjectResource(cal); e != nil {
+			println(k)
 			panic(e)
 		} else if start, until, unbounded, e := core.GetStartUntilUnbounded(md); e != nil {
+			println(k)
 			panic(e)
 		} else {
 			v.start = start
@@ -328,14 +359,13 @@ func (b *FSBackend) checkCalendarObject(r *http.Request, p string, cal *ical.Cal
 	//
 	buf := bytes.NewBuffer(nil)
 
-	loc, err := core.GetLocationFromProp(collection_prop)
+	tz, err := core.GetTimezoneFromProp(collection_prop)
 	if err != nil {
 		return nil, err
 	}
-	// todo: rewrite floating times using loc ?
 
-	if e := core.RewriteFloatingTimes(cal, loc); e != nil {
-		panic(e)
+	if _, e := core.RewriteFloatingTimes(cal, tz); e != nil {
+		return nil, e
 	} else if md, e := core.ParseCalendarObjectResource(cal); e != nil {
 		return nil, e
 	} else if start, until, unbounded, e := core.GetStartUntilUnbounded(md); e != nil {

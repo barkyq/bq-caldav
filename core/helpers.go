@@ -662,68 +662,6 @@ func CoalesceToFreeBusy(periods []Period, fbquery *FBQuery) (cal *ical.Calendar)
 	return
 }
 
-// put helper
-func CheckCalendarObjectSupportedAndValid(request_body io.Reader) (cal *ical.Calendar, err error) {
-	err = &webDAVerror{
-		Code:      http.StatusForbidden,
-		Condition: &validCalendarDataName,
-	}
-
-	if c, e := ical.NewDecoder(request_body).Decode(); e != nil {
-		return
-	} else {
-		cal = c
-	}
-
-	if methodp := cal.Props.Get(ical.PropMethod); methodp != nil {
-		return
-	}
-
-	for _, child := range cal.Children {
-		if val := child.Props.Get(ical.PropRecurrenceDates); val != nil {
-			return
-		}
-		switch child.Name {
-		case ical.CompJournal, ical.CompFreeBusy:
-			// Journals cannot be recurring
-			if val := child.Props.Get(ical.PropRecurrenceRule); val != nil {
-				return
-			} else if val := child.Props.Get(ical.PropRecurrenceDates); val != nil {
-				return
-			} else if val := child.Props.Get(ical.PropExceptionDates); val != nil {
-				return
-			} else if val := child.Props.Get(ical.PropRecurrenceID); val != nil {
-				return
-			}
-		case ical.CompEvent, ical.CompToDo:
-			if val := child.Props.Get(ical.PropRecurrenceID); val == nil {
-				//
-			} else if param := val.Params.Get("RANGE"); param == "THISANDFUTURE" {
-				return
-			}
-		}
-
-		for _, subchild := range child.Children {
-			switch subchild.Name {
-			case ical.CompAlarm:
-				if child.Name != ical.CompEvent && child.Name != ical.CompToDo {
-					return
-				} else if _, e := DoesAlarmIntersect(subchild, child, time.Now(), time.Time{}); e != nil {
-					// check all alarms can be used
-					return
-				}
-			case ical.CompTimezoneDaylight, ical.CompTimezoneStandard:
-				if child.Name != ical.CompTimezone {
-					return
-				}
-			}
-		}
-	}
-
-	err = nil
-	return
-}
-
 func CheckCalendarCompIsSupported(p *Prop, comp_type string) (err error) {
 	err = &webDAVerror{
 		Code: http.StatusInternalServerError,
@@ -867,7 +805,7 @@ func CheckOtherCalendarPreconditions(collection_prop *Prop, md *CalendarMetaData
 	return nil
 }
 
-func GetLocationFromProp(prop *Prop) (loc *time.Location, err error) {
+func GetTimezoneFromProp(prop *Prop) (tz *ical.Component, err error) {
 	for _, p := range prop.Props {
 		if p.XMLName != calendarTimezoneName {
 			continue
@@ -883,14 +821,10 @@ func GetLocationFromProp(prop *Prop) (loc *time.Location, err error) {
 			//
 		} else if tz_cal, e := ical.NewDecoder(br).Decode(); e != nil || len(tz_cal.Children) != 1 {
 			//
-		} else if tz_comp := tz_cal.Children[0]; tz_comp.Name != ical.CompTimezone {
+		} else if t := tz_cal.Children[0]; t.Name != ical.CompTimezone {
 			//
-		} else if tz_id_prop := tz_comp.Props.Get(ical.PropTimezoneID); tz_id_prop == nil {
-			//
-		} else if l, e := time.LoadLocation(tz_id_prop.Value); e != nil {
-			err = e
 		} else {
-			loc = l
+			tz = t
 			err = nil
 		}
 		return
@@ -1179,8 +1113,4 @@ func (q *Query) Scope() Scope {
 	default:
 		return 0
 	}
-}
-
-func RewriteFloatingTimes(cal *ical.Calendar, loc *time.Location) error {
-	return nil
 }
