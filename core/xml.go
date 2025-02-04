@@ -218,6 +218,10 @@ type timeInterval struct {
 	end   time.Time
 }
 
+func (ti *timeInterval) GetTimes() (start, end time.Time) {
+	return ti.start, ti.end
+}
+
 func (ti *timeInterval) UnmarshalXML(d *xml.Decoder, start xml.StartElement) (err error) {
 	err = &webDAVerror{
 		Code: http.StatusBadRequest,

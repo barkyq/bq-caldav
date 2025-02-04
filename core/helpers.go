@@ -684,7 +684,34 @@ func CheckCalendarDataSupportedAndValid(content_type_header string, request_body
 		cal = c
 	}
 
+	if methodp := cal.Props.Get(ical.PropMethod); methodp != nil {
+		return
+	}
+
 	for _, child := range cal.Children {
+		if val := child.Props.Get(ical.PropRecurrenceDates); val != nil {
+			return
+		}
+		switch child.Name {
+		case ical.CompJournal, ical.CompFreeBusy:
+			// Journals cannot be recurring
+			if val := child.Props.Get(ical.PropRecurrenceRule); val != nil {
+				return
+			} else if val := child.Props.Get(ical.PropRecurrenceDates); val != nil {
+				return
+			} else if val := child.Props.Get(ical.PropExceptionDates); val != nil {
+				return
+			} else if val := child.Props.Get(ical.PropRecurrenceID); val != nil {
+				return
+			}
+		case ical.CompEvent, ical.CompToDo:
+			if val := child.Props.Get(ical.PropRecurrenceID); val == nil {
+				//
+			} else if param := val.Params.Get("RANGE"); param == "THISANDFUTURE" {
+				return
+			}
+		}
+
 		for _, subchild := range child.Children {
 			switch subchild.Name {
 			case ical.CompAlarm:

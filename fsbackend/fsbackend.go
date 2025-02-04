@@ -39,6 +39,9 @@ type pfCacheData struct {
 	modified_time  time.Time
 	etag           string
 	uid_key        string
+	start          time.Time
+	until          time.Time
+	unbounded      bool
 }
 
 func NewBackend(location string) *FSBackend {
@@ -97,6 +100,24 @@ func NewBackend(location string) *FSBackend {
 		}
 	}); e != nil {
 		panic(e)
+	}
+
+	for k, v := range pfcache {
+		if v.content_type != ical.MIMEType {
+			continue
+		} else if f, e := fsys.Open(k); e != nil {
+			panic(e)
+		} else if cal, e := ical.NewDecoder(f).Decode(); e != nil {
+			panic(e)
+		} else if md, e := core.ParseCalendarObjectResource(cal, time.UTC); e != nil {
+			panic(e)
+		} else if start, until, unbounded, e := core.GetStartUntilUnbounded(md); e != nil {
+			panic(e)
+		} else {
+			v.start = start
+			v.until = until
+			v.unbounded = unbounded
+		}
 	}
 
 	return &FSBackend{
@@ -307,9 +328,11 @@ func (b *FSBackend) checkCalendarObject(r *http.Request, p string, cal *ical.Cal
 	if err != nil {
 		return nil, err
 	}
-	// todo: rewrite floating times using loc
+	// todo: rewrite floating times using loc ?
 
 	if md, e := core.ParseCalendarObjectResource(cal, loc); e != nil {
+		return nil, e
+	} else if start, until, unbounded, e := core.GetStartUntilUnbounded(md); e != nil {
 		return nil, e
 	} else if e := core.CheckCalendarCompIsSupported(collection_prop, md.ComponentType); e != nil {
 		return nil, e
@@ -336,6 +359,9 @@ func (b *FSBackend) checkCalendarObject(r *http.Request, p string, cal *ical.Cal
 			modified_time:  time.Now(),
 			etag:           base32.StdEncoding.EncodeToString(h.Sum(nil))[:7],
 			uid_key:        uid_key,
+			start:          start,
+			until:          until,
+			unbounded:      unbounded,
 		}
 		b.uidmap[path.Dir(p)+":"+uid] = r.URL.Path
 	}
@@ -550,6 +576,36 @@ func (b *FSBackend) propFindFile(p string) (props_Found []core.Any, err error) {
 	return
 }
 
+type quickQuery struct {
+	start time.Time
+	end   time.Time
+}
+
+// small error chance if the client queries for different components
+// with different time ranges.
+func getQuickQuery(query *core.Query) *quickQuery {
+	var start, end time.Time
+	for _, cf := range query.CalendarFilter.CompFilter.CompFilters {
+		if cf.TimeRange == nil {
+			continue
+		}
+		cf_start, cf_end := cf.TimeRange.GetTimes()
+
+		if start.IsZero() {
+			start = cf_start
+		} else if cf_start.Before(start) {
+			start = cf_start
+		}
+
+		if end.IsZero() {
+			end = cf_end
+		} else if end.Before(cf_end) {
+			cf_end = end
+		}
+	}
+	return &quickQuery{start, end}
+}
+
 // REPORT calendar-query
 func (b *FSBackend) CalendarQuery(r *http.Request, query *core.Query, depth byte) (ms *core.MultiStatus, err error) {
 	p := path.Clean(r.URL.Path)[1:]
@@ -594,9 +650,11 @@ func (b *FSBackend) CalendarQuery(r *http.Request, query *core.Query, depth byte
 	b.lock.Lock()
 	defer b.lock.Unlock()
 
+	qq := getQuickQuery(query)
+
 	resps := make([]core.Response, 0, 128)
 	if !query_root {
-		resps, err = b.queryCalendarCollection(p, query, resps)
+		resps, err = b.queryCalendarCollection(p, query, qq, resps)
 		ms.Responses = resps
 		return
 	} else {
@@ -608,7 +666,7 @@ func (b *FSBackend) CalendarQuery(r *http.Request, query *core.Query, depth byte
 			for _, de := range des {
 				if !de.IsDir() {
 					continue
-				} else if new_resps, e := b.queryCalendarCollection(path.Join(p, de.Name()), query, resps); e != nil {
+				} else if new_resps, e := b.queryCalendarCollection(path.Join(p, de.Name()), query, qq, resps); e != nil {
 					err = e
 					return
 				} else {
@@ -621,15 +679,26 @@ func (b *FSBackend) CalendarQuery(r *http.Request, query *core.Query, depth byte
 	}
 }
 
-func (b *FSBackend) queryCalendarCollection(q string, query *core.Query, resps []core.Response) (new_resps []core.Response, err error) {
+func (b *FSBackend) queryCalendarCollection(q string, query *core.Query, qq *quickQuery, resps []core.Response) (new_resps []core.Response, err error) {
 	if des, e := fs.ReadDir(b.fsys, q); e != nil {
 		// could not read, so empty response
 		return
 	} else {
 		for _, de := range des {
+			p := path.Join(q, de.Name())
 			if de.IsDir() {
 				continue
-			} else if r, m, e := b.queryFile(path.Join(q, de.Name()), query); !m || errors.Is(e, &notFound{}) {
+			} else if cache_data, ok := b.pfcache[p]; !ok {
+				continue
+			} else if !qq.end.IsZero() && (cache_data.start.After(qq.end) || cache_data.start.Equal(qq.end)) {
+				continue
+			} else if cache_data.unbounded {
+				//
+			} else if !qq.start.IsZero() && cache_data.until.Before(qq.start) {
+				continue
+			}
+
+			if r, m, e := b.queryFile(p, query); !m || errors.Is(e, &notFound{}) {
 				continue
 			} else if e != nil {
 				err = e
@@ -915,8 +984,22 @@ func (b *FSBackend) FBQuery(r *http.Request, fbquery *core.FBQuery, depth byte) 
 		err = core.WebDAVerror(http.StatusForbidden, nil)
 	}
 
+	start, end := fbquery.TimeRange.GetTimes()
+
 	periods := make([]core.Period, 0, 128)
 	if e := fs.WalkDir(b.fsys, p, func(q string, de fs.DirEntry, err error) error {
+		if cache_data, ok := b.pfcache[q]; !ok {
+			return nil
+		} else if cache_data.unbounded {
+			//
+		} else if cache_data.until.Before(start) {
+			return nil
+		} else if cache_data.start.After(end) || cache_data.start.Equal(end) {
+			return nil
+		} else {
+			//
+		}
+
 		if err != nil || de.IsDir() {
 			return nil
 		} else if file, e := b.fsys.Open(q); e != nil {
