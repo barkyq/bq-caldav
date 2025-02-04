@@ -782,6 +782,13 @@ func (b *FSBackend) queryFile(p string, query *core.Query) (resp *core.Response,
 	} else {
 		props_Found = pf
 	}
+
+	// not asking for any data?
+	// skip the full query
+	if query.CalendarData == nil && query.AddressData == nil {
+		goto jump
+	}
+
 	switch query.Scope() {
 	case core.CalendarScope:
 		// now check if the file matches the query
@@ -827,6 +834,7 @@ func (b *FSBackend) queryFile(p string, query *core.Query) (resp *core.Response,
 		panic("unknown scope")
 	}
 
+jump:
 	if p == "." {
 		p = "/"
 	} else {
