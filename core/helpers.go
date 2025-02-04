@@ -663,16 +663,7 @@ func CoalesceToFreeBusy(periods []Period, fbquery *FBQuery) (cal *ical.Calendar)
 }
 
 // put helper
-func CheckCalendarDataSupportedAndValid(content_type_header string, request_body io.Reader) (cal *ical.Calendar, err error) {
-	err = &webDAVerror{
-		Code:      http.StatusForbidden,
-		Condition: &supportedCalendarDataName,
-	}
-
-	if mt, _, e := mime.ParseMediaType(content_type_header); e != nil || mt != ical.MIMEType {
-		return
-	}
-
+func CheckCalendarObjectSupportedAndValid(request_body io.Reader) (cal *ical.Calendar, err error) {
 	err = &webDAVerror{
 		Code:      http.StatusForbidden,
 		Condition: &validCalendarDataName,
@@ -717,7 +708,7 @@ func CheckCalendarDataSupportedAndValid(content_type_header string, request_body
 			case ical.CompAlarm:
 				if child.Name != ical.CompEvent && child.Name != ical.CompToDo {
 					return
-				} else if _, e := DoesAlarmIntersect(subchild, child, time.UTC, time.Now(), time.Time{}); e != nil {
+				} else if _, e := DoesAlarmIntersect(subchild, child, time.Now(), time.Time{}); e != nil {
 					// check all alarms can be used
 					return
 				}
@@ -1188,4 +1179,8 @@ func (q *Query) Scope() Scope {
 	default:
 		return 0
 	}
+}
+
+func RewriteFloatingTimes(cal *ical.Calendar, loc *time.Location) error {
+	return nil
 }

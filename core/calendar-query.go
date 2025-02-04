@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
-	"time"
 
 	"github.com/emersion/go-ical"
 )
@@ -69,7 +68,7 @@ func CheckCalendarQueryFilterIsValid(query *Query) (err error) {
 }
 
 func MatchCalendarWithQuery(cal *ical.Calendar, query *Query) (bool, error) {
-	if ok, e := matchCompFilterWithComp(query.CalendarFilter.CompFilter, cal.Component, nil, time.UTC); e != nil {
+	if ok, e := matchCompFilterWithComp(query.CalendarFilter.CompFilter, cal.Component, nil); e != nil {
 		return false, &webDAVerror{
 			Code:      http.StatusForbidden,
 			Condition: &supportedFilterName,
@@ -79,14 +78,14 @@ func MatchCalendarWithQuery(cal *ical.Calendar, query *Query) (bool, error) {
 	}
 }
 
-func matchCompFilterWithComp(cf compFilter, comp *ical.Component, parent *ical.Component, location *time.Location) (match bool, err error) {
+func matchCompFilterWithComp(cf compFilter, comp *ical.Component, parent *ical.Component) (match bool, err error) {
 	switch {
 	case cf.IsNotDefined != nil:
 		return false, nil
 	case cf.TimeRange != nil:
 		switch comp.Name {
 		case ical.CompEvent, ical.CompToDo, ical.CompJournal, ical.CompFreeBusy:
-			if data, e := parseCalendarComponent(comp, location); e != nil {
+			if data, e := parseCalendarComponent(comp); e != nil {
 				return false, e
 			} else if data.Intersect(cf.TimeRange.start, cf.TimeRange.end) {
 				return true, nil
@@ -94,7 +93,7 @@ func matchCompFilterWithComp(cf compFilter, comp *ical.Component, parent *ical.C
 				return false, nil
 			}
 		case ical.CompAlarm:
-			if yes, e := DoesAlarmIntersect(comp, parent, location, cf.TimeRange.start, cf.TimeRange.end); e != nil {
+			if yes, e := DoesAlarmIntersect(comp, parent, cf.TimeRange.start, cf.TimeRange.end); e != nil {
 				return false, e
 			} else if yes {
 				return true, nil
@@ -105,9 +104,9 @@ func matchCompFilterWithComp(cf compFilter, comp *ical.Component, parent *ical.C
 			return false, fmt.Errorf("unsupported comp for time-range")
 		}
 	case cf.PropFilters != nil || cf.CompFilters != nil:
-		if ok1, e := matchPropFiltersWithComp(cf.PropFilters, comp, location); e != nil {
+		if ok1, e := matchPropFiltersWithComp(cf.PropFilters, comp); e != nil {
 			return false, e
-		} else if ok2, e := matchCompFiltersWithCompChildren(cf.CompFilters, comp, location); e != nil {
+		} else if ok2, e := matchCompFiltersWithCompChildren(cf.CompFilters, comp); e != nil {
 			return false, e
 		} else {
 			return ok1 && ok2, nil
@@ -117,7 +116,7 @@ func matchCompFilterWithComp(cf compFilter, comp *ical.Component, parent *ical.C
 	}
 }
 
-func matchPropFiltersWithComp(pfs []calendarPropFilter, comp *ical.Component, location *time.Location) (match bool, err error) {
+func matchPropFiltersWithComp(pfs []calendarPropFilter, comp *ical.Component) (match bool, err error) {
 outer:
 	for _, pf := range pfs {
 		values := comp.Props.Values(pf.Name)
@@ -128,7 +127,7 @@ outer:
 			}
 		case pf.TimeRange != nil:
 			for _, v := range values {
-				if t, e := v.DateTime(location); e != nil {
+				if t, e := v.DateTime(nil); e != nil {
 					return false, e
 				} else if t.After(pf.TimeRange.end) || t.Before(pf.TimeRange.start) || t.Equal(pf.TimeRange.end) {
 					continue
@@ -199,13 +198,13 @@ outer:
 	return true
 }
 
-func matchCompFiltersWithCompChildren(cfs []compFilter, parent *ical.Component, location *time.Location) (match bool, err error) {
+func matchCompFiltersWithCompChildren(cfs []compFilter, parent *ical.Component) (match bool, err error) {
 outer:
 	for _, cf := range cfs {
 		for _, child := range parent.Children {
 			if child.Name != cf.Name {
 				continue
-			} else if match, err = matchCompFilterWithComp(cf, child, parent, location); err != nil {
+			} else if match, err = matchCompFilterWithComp(cf, child, parent); err != nil {
 				return false, err
 			} else if match {
 				continue outer

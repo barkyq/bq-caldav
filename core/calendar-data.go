@@ -141,14 +141,14 @@ func checkPropReqRepetitions(props []propReq) (err error) {
 }
 
 // Marshals the output for calendar-data
-func CalendarData(cal *ical.Calendar, cd *CalendarDataReq, location *time.Location) (*Any, error) {
+func CalendarData(cal *ical.Calendar, cd *CalendarDataReq) (*Any, error) {
 	if cd == nil {
 		return nil, nil
 	}
 
 	if cd.Expand == nil {
 		// do nothing
-	} else if c, e := expandCalendar(cal, cd.Expand, location); e != nil {
+	} else if c, e := expandCalendar(cal, cd.Expand); e != nil {
 		return nil, e
 	} else {
 		cal = c
@@ -156,7 +156,7 @@ func CalendarData(cal *ical.Calendar, cd *CalendarDataReq, location *time.Locati
 
 	if cd.LimitRecurrenceSet == nil {
 		// do nothing
-	} else if c, e := limitRecurrenceSet(cal, cd.LimitRecurrenceSet, location); e != nil {
+	} else if c, e := limitRecurrenceSet(cal, cd.LimitRecurrenceSet); e != nil {
 		return nil, e
 	} else {
 		cal = c
@@ -216,7 +216,7 @@ func CalendarData(cal *ical.Calendar, cd *CalendarDataReq, location *time.Locati
 	}, nil
 }
 
-func expandCalendar(source *ical.Calendar, expand *timeInterval, location *time.Location) (expanded *ical.Calendar, err error) {
+func expandCalendar(source *ical.Calendar, expand *timeInterval) (expanded *ical.Calendar, err error) {
 	for _, child := range source.Children {
 		if child.Name == ical.CompJournal || child.Name == ical.CompFreeBusy {
 			expanded = source
@@ -240,7 +240,7 @@ func expandCalendar(source *ical.Calendar, expand *timeInterval, location *time.
 
 	expanded.Props.SetText(ical.PropProductID, "-//bq-caldav//expand//EN")
 	expanded.Props.SetText(ical.PropVersion, "2.0")
-	if md, e := ParseCalendarObjectResource(source, location); e != nil {
+	if md, e := ParseCalendarObjectResource(source); e != nil {
 		err = e
 		return
 	} else {
@@ -430,7 +430,7 @@ func limitFreeBusySet(source *ical.Calendar, limit_freebusy_set *timeInterval) (
 	return source, nil
 }
 
-func limitRecurrenceSet(source *ical.Calendar, limit_recurrence_set *timeInterval, location *time.Location) (limited *ical.Calendar, err error) {
+func limitRecurrenceSet(source *ical.Calendar, limit_recurrence_set *timeInterval) (limited *ical.Calendar, err error) {
 	for _, child := range source.Children {
 		if child.Name == ical.CompJournal || child.Name == ical.CompFreeBusy {
 			limited = source
@@ -455,7 +455,7 @@ func limitRecurrenceSet(source *ical.Calendar, limit_recurrence_set *timeInterva
 	limited.Props.SetText(ical.PropProductID, "-//bq-caldav//limit-recurrence-set//EN")
 	limited.Props.SetText(ical.PropVersion, "2.0")
 
-	if md, e := ParseCalendarObjectResource(source, location); e != nil {
+	if md, e := ParseCalendarObjectResource(source); e != nil {
 		err = e
 		return
 	} else {

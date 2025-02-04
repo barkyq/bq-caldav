@@ -170,7 +170,7 @@ func parseDuration(val string) (dur time.Duration, err error) {
 	return time.Duration(seconds) * time.Second, nil
 }
 
-func parseJournal(comp *ical.Component, timezone *time.Location) (data *compData, err error) {
+func parseJournal(comp *ical.Component) (data *compData, err error) {
 	data = &compData{}
 
 	// get UID
@@ -179,7 +179,7 @@ func parseJournal(comp *ical.Component, timezone *time.Location) (data *compData
 	// if there is no dtstart, it should not match any filter
 	// so we can leave it unset
 	if val := comp.Props.Get(ical.PropDateTimeStart); val != nil {
-		if t, e := val.DateTime(timezone); e != nil {
+		if t, e := val.DateTime(nil); e != nil {
 			err = e
 			return
 		} else {
@@ -198,7 +198,7 @@ func parseJournal(comp *ical.Component, timezone *time.Location) (data *compData
 	return
 }
 
-func parseFreeBusy(comp *ical.Component, timezone *time.Location) (data *compData, err error) {
+func parseFreeBusy(comp *ical.Component) (data *compData, err error) {
 	data = &compData{}
 
 	if val_start := comp.Props.Get(ical.PropDateTimeStart); val_start == nil {
@@ -207,13 +207,13 @@ func parseFreeBusy(comp *ical.Component, timezone *time.Location) (data *compDat
 		//
 	} else {
 		// both DTSTART and DTEND, so this should be used for matching time.
-		if t, e := val_start.DateTime(timezone); e != nil {
+		if t, e := val_start.DateTime(nil); e != nil {
 			err = e
 			return
 		} else {
 			data.dtstart = t
 		}
-		if t, e := val_end.DateTime(timezone); e != nil {
+		if t, e := val_end.DateTime(nil); e != nil {
 			err = e
 			return
 		} else {
@@ -279,14 +279,14 @@ func filterFreeBusyPeriod(p *ical.Prop, min time.Time, max time.Time) (err error
 	return
 }
 
-func FBQueryObject(cal *ical.Calendar, location *time.Location, fbquery *FBQuery, periods_in []Period) (periods_out []Period, err error) {
+func FBQueryObject(cal *ical.Calendar, fbquery *FBQuery, periods_in []Period) (periods_out []Period, err error) {
 	for _, c := range cal.Children {
 		switch c.Name {
 		case ical.CompJournal, ical.CompToDo:
 			periods_out = periods_in
 			return
 		case ical.CompEvent:
-			if ps, e := eventToFreeBusyPeriods(cal, location, fbquery.TimeRange.start, fbquery.TimeRange.end); e != nil {
+			if ps, e := eventToFreeBusyPeriods(cal, fbquery.TimeRange.start, fbquery.TimeRange.end); e != nil {
 				err = e
 			} else {
 				periods_out = append(periods_in, ps...)
@@ -304,13 +304,13 @@ func FBQueryObject(cal *ical.Calendar, location *time.Location, fbquery *FBQuery
 	return
 }
 
-func eventToFreeBusyPeriods(cal *ical.Calendar, location *time.Location, start time.Time, end time.Time) (periods []Period, err error) {
+func eventToFreeBusyPeriods(cal *ical.Calendar, start time.Time, end time.Time) (periods []Period, err error) {
 	// receive the full calendar to handle master + rescheds
 	var master *compData
 	var rescheds []*compData
 	var exdates []time.Time
 
-	if md, e := ParseCalendarObjectResource(cal, location); e != nil {
+	if md, e := ParseCalendarObjectResource(cal); e != nil {
 		err = e
 		return
 	} else {
@@ -454,12 +454,17 @@ func parseFreeBusyPeriod(p ical.Prop, no_transp bool) (periods []Period, err err
 	return
 }
 
-func parseEvent(comp *ical.Component, timezone *time.Location) (data *compData, err error) {
+func parseEvent(comp *ical.Component) (data *compData, err error) {
 	data = &compData{}
 	err = fmt.Errorf("parse error")
 
 	if val := comp.Props.Get(ical.PropDateTimeStart); val != nil {
-		if t, e := val.DateTime(timezone); e != nil {
+		if len(val.Value) == len(dateTimeFormat) {
+			if val.Params.Get("TZID") == "" {
+				println("floating time")
+			}
+		}
+		if t, e := val.DateTime(nil); e != nil {
 			err = e
 			return
 		} else {
@@ -481,7 +486,7 @@ func parseEvent(comp *ical.Component, timezone *time.Location) (data *compData, 
 			data.end_name = ical.PropDuration
 		}
 	} else if val := comp.Props.Get(ical.PropDateTimeEnd); val != nil {
-		if t, e := val.DateTime(timezone); e != nil {
+		if t, e := val.DateTime(nil); e != nil {
 			err = e
 			return
 		} else {
@@ -499,7 +504,7 @@ func parseEvent(comp *ical.Component, timezone *time.Location) (data *compData, 
 
 	// get recurrenceid or recurrence rule (but not both)
 	if val := comp.Props.Get(ical.PropRecurrenceID); val != nil {
-		if t, e := val.DateTime(timezone); e != nil {
+		if t, e := val.DateTime(nil); e != nil {
 			err = e
 			return
 		} else {
@@ -544,12 +549,12 @@ func parseEvent(comp *ical.Component, timezone *time.Location) (data *compData, 
 	return
 }
 
-func parseTodo(comp *ical.Component, timezone *time.Location) (data *compData, err error) {
+func parseTodo(comp *ical.Component) (data *compData, err error) {
 	data = &compData{}
 	err = fmt.Errorf("parse error")
 
 	if val := comp.Props.Get(ical.PropDateTimeStart); val != nil {
-		if t, e := val.DateTime(timezone); e != nil {
+		if t, e := val.DateTime(nil); e != nil {
 			err = e
 			return
 		} else {
@@ -561,7 +566,7 @@ func parseTodo(comp *ical.Component, timezone *time.Location) (data *compData, e
 	// get due OR duration
 	if val := comp.Props.Get(ical.PropDue); val != nil {
 		var due time.Time
-		if t, e := val.DateTime(timezone); e != nil {
+		if t, e := val.DateTime(nil); e != nil {
 			err = e
 			return
 		} else {
@@ -611,7 +616,7 @@ func parseTodo(comp *ical.Component, timezone *time.Location) (data *compData, e
 		// dtstart was not set yet; assume completed/created handling
 		var created, completed time.Time
 		if val := comp.Props.Get(ical.PropCompleted); val != nil {
-			if t, e := val.DateTime(timezone); e != nil {
+			if t, e := val.DateTime(nil); e != nil {
 				err = e
 				return
 			} else {
@@ -619,7 +624,7 @@ func parseTodo(comp *ical.Component, timezone *time.Location) (data *compData, e
 			}
 		}
 		if val := comp.Props.Get(ical.PropCreated); val != nil {
-			if t, e := val.DateTime(timezone); e != nil {
+			if t, e := val.DateTime(nil); e != nil {
 				err = e
 				return
 			} else {
@@ -651,7 +656,7 @@ func parseTodo(comp *ical.Component, timezone *time.Location) (data *compData, e
 	return
 }
 
-func parseCalendarComponent(comp *ical.Component, location *time.Location) (data *compData, err error) {
+func parseCalendarComponent(comp *ical.Component) (data *compData, err error) {
 	err = &webDAVerror{
 		Code:      http.StatusForbidden,
 		Condition: &validCalendarObjectResourceName,
@@ -659,25 +664,25 @@ func parseCalendarComponent(comp *ical.Component, location *time.Location) (data
 
 	switch comp.Name {
 	case ical.CompEvent:
-		if edt, e := parseEvent(comp, location); e != nil {
+		if edt, e := parseEvent(comp); e != nil {
 			return
 		} else {
 			data = edt
 		}
 	case ical.CompJournal:
-		if jdt, e := parseJournal(comp, location); e != nil {
+		if jdt, e := parseJournal(comp); e != nil {
 			return
 		} else {
 			data = jdt
 		}
 	case ical.CompToDo:
-		if tdt, e := parseTodo(comp, location); e != nil {
+		if tdt, e := parseTodo(comp); e != nil {
 			return
 		} else {
 			data = tdt
 		}
 	case ical.CompFreeBusy:
-		if fbdt, e := parseFreeBusy(comp, location); e != nil {
+		if fbdt, e := parseFreeBusy(comp); e != nil {
 			return
 		} else {
 			data = fbdt
@@ -781,7 +786,7 @@ func GetStartUntilUnbounded(metadata *CalendarMetaData) (start time.Time, until 
 	return
 }
 
-func ParseCalendarObjectResource(cal *ical.Calendar, location *time.Location) (metadata *CalendarMetaData, err error) {
+func ParseCalendarObjectResource(cal *ical.Calendar) (metadata *CalendarMetaData, err error) {
 	err = &webDAVerror{
 		Code:      http.StatusForbidden,
 		Condition: &validCalendarObjectResourceName,
@@ -796,7 +801,7 @@ func ParseCalendarObjectResource(cal *ical.Calendar, location *time.Location) (m
 		} else if child.Name != metadata.ComponentType {
 			return
 		}
-		if comp, e := parseCalendarComponent(child, location); e != nil {
+		if comp, e := parseCalendarComponent(child); e != nil {
 			err = e
 			return
 		} else {
@@ -812,7 +817,7 @@ func ParseCalendarObjectResource(cal *ical.Calendar, location *time.Location) (m
 				return
 			} else {
 				has_master = true
-				if exd, e := parseExDates(c.comp, location); e != nil {
+				if exd, e := parseExDates(c.comp); e != nil {
 					// check the master has well-formatted exdates
 					return
 				} else {
@@ -831,9 +836,10 @@ func ParseCalendarObjectResource(cal *ical.Calendar, location *time.Location) (m
 	return
 }
 
-func parseExDates(comp *ical.Component, location *time.Location) (exdates []time.Time, err error) {
+func parseExDates(comp *ical.Component) (exdates []time.Time, err error) {
 	exdates = make([]time.Time, 0, 8)
 	err = fmt.Errorf("bad exdates")
+	location := time.UTC
 	for _, p := range comp.Props.Values(ical.PropExceptionDates) {
 		switch p.ValueType() {
 		case ical.ValueDateTime:
@@ -871,7 +877,7 @@ func parseExDates(comp *ical.Component, location *time.Location) (exdates []time
 	return
 }
 
-func DoesAlarmIntersect(alarm *ical.Component, parent *ical.Component, location *time.Location, start time.Time, end time.Time) (yes bool, err error) {
+func DoesAlarmIntersect(alarm *ical.Component, parent *ical.Component, start time.Time, end time.Time) (yes bool, err error) {
 	err = fmt.Errorf("invalid alarm")
 	var alarm_repeat uint64 = 0
 	if p := alarm.Props.Get(ical.PropRepeat); p == nil {
@@ -894,7 +900,7 @@ func DoesAlarmIntersect(alarm *ical.Component, parent *ical.Component, location 
 	var parent_data *compData
 	if p := alarm.Props.Get(ical.PropTrigger); p == nil {
 		return
-	} else if pd, e := parseCalendarComponent(parent, location); e != nil {
+	} else if pd, e := parseCalendarComponent(parent); e != nil {
 		return
 	} else {
 		parent_data = pd
@@ -920,7 +926,7 @@ func DoesAlarmIntersect(alarm *ical.Component, parent *ical.Component, location 
 			}
 			parent_data.duration = 0
 		case ical.ValueDateTime:
-			if t, e := p.DateTime(location); e != nil {
+			if t, e := p.DateTime(nil); e != nil {
 				return
 			} else {
 				parent_data.dtstart = t

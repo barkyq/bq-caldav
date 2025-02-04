@@ -10,6 +10,7 @@ import (
 	"hash/fnv"
 	"io"
 	"io/fs"
+	"mime"
 	"net/http"
 	"os"
 	"path"
@@ -44,13 +45,13 @@ type pfCacheData struct {
 	unbounded      bool
 }
 
-func NewBackend(location string) *FSBackend {
-	if e := os.MkdirAll(path.Join(location, "calendars"), os.ModePerm); e != nil {
+func NewBackend(root string) *FSBackend {
+	if e := os.MkdirAll(path.Join(root, "calendars"), os.ModePerm); e != nil {
 		panic(e)
-	} else if e := os.MkdirAll(path.Join(location, "addressbook"), os.ModePerm); e != nil {
+	} else if e := os.MkdirAll(path.Join(root, "addressbook"), os.ModePerm); e != nil {
 		panic(e)
 	}
-	fsys := os.DirFS(location)
+	fsys := os.DirFS(root)
 	br := new(bufio.Reader)
 	uidmap := make(map[string]string)
 	pfcache := make(map[string]*pfCacheData)
@@ -107,9 +108,9 @@ func NewBackend(location string) *FSBackend {
 			continue
 		} else if f, e := fsys.Open(k); e != nil {
 			panic(e)
-		} else if cal, e := ical.NewDecoder(f).Decode(); e != nil {
+		} else if cal, e := core.CheckCalendarObjectSupportedAndValid(f); e != nil {
 			panic(e)
-		} else if md, e := core.ParseCalendarObjectResource(cal, time.UTC); e != nil {
+		} else if md, e := core.ParseCalendarObjectResource(cal); e != nil {
 			panic(e)
 		} else if start, until, unbounded, e := core.GetStartUntilUnbounded(md); e != nil {
 			panic(e)
@@ -122,15 +123,15 @@ func NewBackend(location string) *FSBackend {
 
 	return &FSBackend{
 		create: func(p string) (io.WriteCloser, error) {
-			return os.Create(path.Join(location, p))
+			return os.Create(path.Join(root, p))
 		},
 		mkdir: func(p string) error {
-			return os.Mkdir(path.Join(location, p), os.ModePerm)
+			return os.Mkdir(path.Join(root, p), os.ModePerm)
 		},
 		delete: func(p string) error {
-			return os.RemoveAll(path.Join(location, p))
+			return os.RemoveAll(path.Join(root, p))
 		},
-		fsys:    os.DirFS(location),
+		fsys:    os.DirFS(root),
 		uidmap:  uidmap,
 		pfcache: pfcache,
 		lock:    new(sync.Mutex),
@@ -257,7 +258,10 @@ func (b *FSBackend) Put(r *http.Request) (err error) {
 	var body io.Reader
 	switch path.Dir(path.Dir(p)) {
 	case "calendars":
-		if cal, e := core.CheckCalendarDataSupportedAndValid(r.Header.Get("Content-Type"), r.Body); e != nil {
+		if mt, _, e := mime.ParseMediaType(r.Header.Get("Content-Type")); e != nil || mt != ical.MIMEType {
+			err = core.WebDAVerror(http.StatusUnsupportedMediaType, nil)
+			return
+		} else if cal, e := core.CheckCalendarObjectSupportedAndValid(r.Body); e != nil {
 			err = e
 		} else if b, e := b.checkCalendarObject(r, p, cal); e != nil {
 			err = e
@@ -330,7 +334,9 @@ func (b *FSBackend) checkCalendarObject(r *http.Request, p string, cal *ical.Cal
 	}
 	// todo: rewrite floating times using loc ?
 
-	if md, e := core.ParseCalendarObjectResource(cal, loc); e != nil {
+	if e := core.RewriteFloatingTimes(cal, loc); e != nil {
+		panic(e)
+	} else if md, e := core.ParseCalendarObjectResource(cal); e != nil {
 		return nil, e
 	} else if start, until, unbounded, e := core.GetStartUntilUnbounded(md); e != nil {
 		return nil, e
@@ -806,7 +812,7 @@ func (b *FSBackend) queryFile(p string, query *core.Query) (resp *core.Response,
 			// did not match
 			err = &notFound{}
 			return
-		} else if a, e := core.CalendarData(cal, query.CalendarData, time.UTC); e != nil {
+		} else if a, e := core.CalendarData(cal, query.CalendarData); e != nil {
 			// internal server error or webdav not-implemented
 			err = e
 			return
@@ -941,7 +947,7 @@ jump:
 		} else if cal, e := ical.NewDecoder(file).Decode(); e != nil {
 			err = &notFound{}
 			return
-		} else if a, e := core.CalendarData(cal, multiget.CalendarData, time.UTC); e != nil {
+		} else if a, e := core.CalendarData(cal, multiget.CalendarData); e != nil {
 			err = e
 			return
 		} else if a != nil {
@@ -1016,7 +1022,7 @@ func (b *FSBackend) FBQuery(r *http.Request, fbquery *core.FBQuery, depth byte) 
 			return file.Close()
 		} else if e := file.Close(); e != nil {
 			return e
-		} else if ps, e := core.FBQueryObject(cal, time.UTC, fbquery, periods); e != nil {
+		} else if ps, e := core.FBQueryObject(cal, fbquery, periods); e != nil {
 			return e
 		} else {
 			periods = ps
